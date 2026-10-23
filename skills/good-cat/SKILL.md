@@ -1,88 +1,74 @@
 ---
 name: good-cat
-description: 优化 FlClash 当前代理。只读检查环境并确认订阅和参考自定义配置，以参考配置为模板保留策略组、规则集、测试地址和覆盖项；Python 自动逐节点测速，按每轮不超过 600ms 筛选，由模型选择两个地区并生成合格节点精确白名单。不退出 FlClash，不切换当前代理，不直接写运行中的数据库；未完成测速不交付半成品。
-compatibility: Python 3.9+、FlClash 及可用订阅缓存。YAML 解析需 PyYAML，代理协议转发需独立 Mihomo CLI；不调用核心 API。数据库读取结构针对 macOS FlClash v0.9.1，其他版本/平台须核对路径和兼容性。
+description: 优化 FlClash 当前代理。只读检查后，一次询问要优化的订阅和新配置名称，说明安装独立 Mihomo、联网测速及后续流程，统一确认继续。使用 Skill 内置标准，不参考本机其他自定义配置；自动逐节点测速、选择地区并生成每轮不超过600ms的精确节点白名单。保持当前代理运行，不重复询问模板、安装或测速许可；未实际创建成功不得宣称完成。
+compatibility: Python 3.9+、FlClash及本地订阅缓存；YAML解析需PyYAML，节点协议转发需独立Mihomo。已核对macOS FlClash v0.9.1数据库结构。当前支持只读草案、自动测速、筛选和配置文件导出；无中断数据库custom创建尚未实现。
 ---
 
 # good-cat：优化当前代理
 
-始终用中文。先读 `references/workflow.md`、`references/optimization.md`。从本文件目录定位 `scripts/flclash.py`（只读 inspect/check）、`scripts/goodcat.py`（草案/测速/白名单/导出）及 `scripts/benchmark.py`（临时代理和 Python HTTPS 测速）。不要假设工作目录就是 Skill 目录。
+始终用中文。先读 `references/workflow.md`、`references/optimization.md`。从 Skill 目录定位脚本，不假设工作目录就是 Skill 目录。
 
-## 不可破坏的约束
+## 交互约定：只问两项，一次确认
 
-- **现有 FlClash 可能承载当前模型连接，整个会话必须保持现有代理可用。** 不退出、重启、强制结束 FlClash 或其核心，不切换当前配置/节点，不更改系统代理、TUN、DNS 或 controller。
-- 不在线写 SQLite，不去掉底层 offline 检查来绕过限制。本流程禁止调用 `flclash.py apply/restore`。没有验证过的无中断创建方式时，保留私有计划并明确报告阻塞，不冒险写库。
-- 原有配置和订阅只读。名字以 `GoodCat-XXX` 开头，重名则停止，不能覆盖已有同名配置。
-- 默认只读；安装依赖、网络测速先征得同意。不上传订阅 URL、节点凭据、数据库或日志。所有产物位于项目已忽略的 `.flclash-local/`，输出路径必须未占用。
-- **先测速，后筛选，再交付；未完成筛选不导入/创建配置。** 私有草案不等于已经创建自定义配置。
-- 临时核心只负责节点协议转发，Python 负责请求计时；不是纯 Python 协议实现，不是核心 API 测速。不得用 TCP ping、系统直连或其他服务延迟代替逐节点 HTTPS 测试。
+先只读检查FlClash安装、数据库路径、Python/PyYAML、独立Mihomo和订阅缓存。未安装FlClash或无订阅则说明阻碍，不能继续。不要让用户提供数据库ID或技术方案。
 
-## 1. 检查环境和选择来源
+正常流程只需收集：
+1. 要优化哪个订阅（列出名称）。
+2. 新自定义配置叫什么（格式 `GoodCat-XXX`，给出对应订阅的简短建议）。
 
-1. 用系统工具确认 FlClash 已安装，定位其 SQLite 数据库。macOS 默认 `~/Library/Application Support/com.follow.clash/database.sqlite`；其他平台仅搜索合理应用数据目录或询问路径。不创建空数据库，未安装则停止。
-2. 验证 Python >=3.9 及 sqlite3、ssl、http.client。缺失时先说明安装方案并询问同意；安装后重新验证。YAML 缓存需要 PyYAML，使用项目虚拟环境安装；测速需要可信独立 Mihomo CLI，核对来源、架构和 `-v`，缺失时停止测速或经同意安装，不用 FlClash 动态库冒充 CLI。
-3. 执行 `python3 <SKILL_DIR>/scripts/flclash.py inspect`。列出订阅 ID/label/type，询问优化哪个订阅（即使只有一个也确认）；用户已明确选择则不重复询问。
-4. 同时列出 custom 配置，请用户选择参考配置。不得假设叫 GoodCat。只读核对参考配置的四组结构、顺序、规则提供者、测试 URL、DNS/TUN 覆盖，不自行添加通用模板或替换规则集。
-5. 确认所选订阅缓存来源，默认数据库同级 `profiles/<订阅ID>.yaml`。路径不同可指定 `--nodes-file`；不把其他订阅/运行配置作为节点缓存，不静默下载刷新订阅。
-6. 确认优化目标和名称 `GoodCat-XXX`。订阅名超过约20字符或包含冗余套餐信息时，给出2–3个简短建议并询问命名。确认后生成草案：
+一次性列出以上两项、说明后续工作，并统一询问是否继续。例如：
 
-```bash
-python3 <GC_SCRIPT> create-plan --subscription-id <订阅ID> --template-id <参考custom ID> --name 'GoodCat-XXX' --out .flclash-local/draft.json
-```
+> 检查完成，可选订阅：咕嘎云、良心云。
+> 请一次回复：要优化的订阅、新配置名称（建议 GoodCat-咕嘎 / GoodCat-良心），以及是否继续。
+> 继续后我会补齐运行依赖；测速需要独立 Mihomo，我会安装官方对应系统/架构版本，不启动后台服务。随后按内置标准自动生成草案，对该订阅全部节点执行三轮 ChatGPT、Gemini 和 Google HTTPS 测试（约节点数×9次请求，单次默认5秒超时），逐组选择两个低延迟地区，保留每轮均≤600ms的节点，校验并准备新配置。全过程保持当前代理不变。
 
-非默认数据库：`flclash.py --db <DB> inspect`；goodcat 子命令后加 `--db <DB>`。
+**必须在这次确认前如实说明实际能力限制：目前尚不能无中断写入FlClash custom，若用户安装的是当前版本，需告知本次仅能导出文件、应用创建受阻。不能承诺确认后一定自动创建成功。**
 
-## 2. 审阅草案，不写数据库
+用户已提供的订阅/名称不重复询问；名称太长可在这一次询问中给建议。统一“继续”即覆盖已说明的常规依赖安装和联网测速，不再逐项询问安装Mihomo、是否联网、测试地址、轮数、地区、参考模板或偏好。模型根据实际排序自动选择地区并报告理由。只有出现未覆盖的管理员权限、破坏性操作、无效命名/冲突或确实阻塞的问题才说明并请求必要输入，不能为了减少提问隐瞒失败。
 
-- 从参考配置复制四个组的名称（含图标）、顺序、类型、测试地址和额外参数；复制规则顺序、规则集引用、直连策略、覆盖项。创建时不复制旧行 ID 或界面选中/展开状态。
-- 唯一明确的来源变更：四组均绑定所选订阅的原始数据库 label，并取消 `include-all-providers/include-all/include-all-proxies`，避免其他机场混入。向用户明确展示这一变化，不能默默继承跨机场来源。
-- 仅三个业务 url-test 组的地区 filter 在草案阶段置空，之后必须以实际测速白名单填充；“节点筛选”的 exclude-filter/hidden 原样保留，不把公告排除项复制到其他组。
-- 不添加 interval/tolerance，不更换 ChatGPT 测试地址，不用零散域名替代 OpenAI/Gemini/China 等已有规则集，不丢弃 LAN、Apple/Microsoft 或 DNS 模式覆盖。模板原来没有的规则也不能无条件新增。
-- 显式说明私有草案尚未保存到 FlClash。
+## 标准来源
 
-## 3. 保持当前代理运行，自动测速
+**仅使用 Skill 自带 `references/standard.json`。** 不询问参考配置，不依赖用户电脑存在 GoodCat，不读取其他custom作为模板，不使用 `--template-id`。
 
-说明测试地址、节点数×三个地址×轮数的请求量和超时，获得网络测速同意后执行：
+内置四组依次为 🤖 ChatGPT、✨ Gemini、🚀 默认代理、🔎节点筛选。全部明确绑定所选订阅数据库label；三个业务组初始filter为空，不设置include-all系列，不额外加入interval/tolerance或公告排除。公告排除仅在隐藏的节点筛选组。测试地址分别为ChatGPT trace、Gemini首页和Google generate_204。
+
+内置私网/LAN/Apple/Microsoft/国内直连、ChatGPT/Gemini常见域名及MATCH规则，不依赖用户已添加OpenAI/Gemini/China规则提供者。域名清单属于版本化标准，不冒充完整服务规则集；本机geodata须校验兼容性。内置DNS模式为redir-host，不复制其他配置覆盖项，不修改当前运行环境。
+
+## 自动执行顺序
+
+1. 根据用户统一确认，补齐缺少的依赖。Python>=3.9，标准库sqlite3/ssl/http.client；PyYAML安装在项目虚拟环境；独立Mihomo核实官方来源、系统/架构和发布校验信息，使用 `-v` 验证。不得使用FlClash动态库冒充CLI，不擅自提权或安装后台服务。
+2. 确认数据库订阅label、ID和缓存归属。macOS数据库默认 `~/Library/Application Support/com.follow.clash/database.sqlite`，缓存默认同级 `profiles/<订阅ID>.yaml`。其他路径核实后指定 `--db` / `--nodes-file`；不替换成其他订阅或运行配置，不上传节点凭据。
+3. 在项目已忽略的 `.flclash-local/` 生成草案（文件名不得已存在）：
 
 ```bash
-python3 <GC_SCRIPT> benchmark --plan .flclash-local/draft.json --core <独立Mihomo路径> --rounds 3 --confirm-network --out .flclash-local/benchmark.json
+python3 <SKILL_DIR>/scripts/goodcat.py create-plan --subscription-id <订阅ID> --name 'GoodCat-XXX' --out .flclash-local/draft.json
 ```
 
-不需要新建配置 ID、controller、secret、退出应用或手动切换节点。脚本自动管理回环认证代理和单节点核心，Python 每次新建 CONNECT/TLS/GET 连接，测试完成或异常时清理本次临时进程和凭据文件。不碰现有应用进程。
+4. 自动测速，无需先写数据库，无需用户切换配置/节点、controller或secret：
 
-当前 TUN/VPN 可能影响测量路径，需记录环境并如实说明，不能为了消除影响关闭当前代理；无法保证隔离则将结果标为受当前网络影响，不承诺跨平台数字完全一致。
+```bash
+python3 <SKILL_DIR>/scripts/goodcat.py benchmark --plan .flclash-local/draft.json --core <独立Mihomo路径> --rounds 3 --confirm-network --out .flclash-local/benchmark.json
+```
 
-默认3轮。每组保留所有**每轮均成功、HTTP 2xx/3xx 且每轮 <=600ms**的节点，按中位数升序展示所有合格节点。失败保留错误和状态，不能记为0ms；无合格节点则停止交付。耗时包含 CONNECT+TLS+GET至响应头，不含核心启动，不跟随重定向，不证明AI服务解锁。
-
-## 4. 选择地区，生成“地区 ∩ 合格节点”白名单
-
-模型从各组排序结果依次识别两个不同国家地区，展示对应节点与延迟，结合用户偏好说明取舍；只有一个地区时明确说明，不能凑两个。地区只按节点名推断，含混时询问。
-
-`regions.json` 格式示例（不是默认选择）：
+Python启动仅回环认证端口的临时独立核心，固定逐节点出口；Python发起CONNECT+TLS+HTTPS GET并计时至响应头，不跟随重定向。所有轮次HTTP2xx/3xx且每轮≤600ms才合格，按中位数排序。每个服务独立测速，保留全部结果，不用直连或TCP ping冒充。失败记错误，不记0ms。完成/异常时清理本次进程和临时凭据，不碰现有FlClash。当前VPN/TUN可能影响测量，应记录而非关闭。
+5. 模型逐组从最快合格节点选择最先出现的两个不同地区，只有一个时选一个并说明；无合格节点则报告阻塞，不放宽阈值或生成空白半成品。按 `filters.json` 识别地区，生成地区代码文件，不再次征求选择：
 
 ```json
 {"ChatGPT":["TW","JP"],"Gemini":["SG","US"],"默认代理":["SG","JP"]}
 ```
 
-```bash
-python3 <GC_SCRIPT> filter-plan --plan .flclash-local/draft.json --selection .flclash-local/regions.json --report .flclash-local/benchmark.json --out .flclash-local/final-plan.json
-```
-
-脚本核对来源、数据库指纹、URL，并重新检查每轮状态和延迟，不直接相信 eligible 标记。过滤项使用锚定的节点名称精确白名单，只有入选地区中的实际合格节点可进入；不会因为同地区而放入未达标或未来新增节点。未来刷新订阅需重新测速。
-
-当前内置地区及公告模式见 `references/filters.json`。原模板的反引号、lookbehind 等语义不在本流程中擅自改写；最终白名单需在实际兼容核心中校验。
-
-## 5. 导出及交付门槛
-
-先检查最终计划：
+此示例不是预定选择，必须依据实际结果。
 
 ```bash
-python3 <DB_SCRIPT> check .flclash-local/final-plan.json
-python3 <GC_SCRIPT> export-config --plan .flclash-local/final-plan.json --out .flclash-local/GoodCat-XXX.json
+python3 <SKILL_DIR>/scripts/goodcat.py filter-plan --plan .flclash-local/draft.json --selection .flclash-local/regions.json --report .flclash-local/benchmark.json --out .flclash-local/final-plan.json
+python3 <SKILL_DIR>/scripts/flclash.py check .flclash-local/final-plan.json
+python3 <SKILL_DIR>/scripts/goodcat.py export-config --plan .flclash-local/final-plan.json --out .flclash-local/GoodCat-XXX.json
 ```
 
-**当前限制：** `export-config` 尚不支持数据库规则提供者的无损编译；遇到 RULE_SET 会明确拒绝导出，而不是删除规则或降级成零散域名。所选模板含规则集时，只能交付已校验计划并报告“尚未创建，导出受阻”。不要把计划 JSON 当成可导入的 Clash 配置，也不要为了完成任务回退到退出应用写库。
+脚本重查provider/base/URL及每轮结果，生成“入选地区∩实际合格节点”的精确名称正则，不放入同地区未达标或新增节点。计划JSON不是Clash配置，不能混用。
 
-无规则集模板的导出文件仍需核对 file provider 相对路径（从应用工作目录解析）、启用的覆盖键，并用可信兼容核心 `-t -f` 校验，再确认应用的导入方式与源数据是否可编辑；不把任意文件导入等同于创建 custom 数据库配置。只有经过验证的无中断创建方式才可以另行经用户同意执行。
+6. 核对导出配置的file provider路径相对于应用工作目录能解析，兼容核心 `-t -f` 校验通过后才可交付。**当前尚未实现运行中FlClash无中断custom创建**，不能宣称导出即创建，不能擅自调用apply/restore、在线SQL、退出/重启应用来绕过。标准配置不再因本机缺少参考custom或规则提供者而阻塞，但应用创建的缺口仍须如实报告。
 
-最终分别报告：草案/测速/筛选/计划校验/配置导出/应用创建/生成文件/网络验证。未执行或阻塞明确列出，不把结构测试通过说成已经生效。用户稍后手动验证时，仅提供可确认的名称、产物路径和待验证事项，不擅自切换当前出口。
+## 完成报告
+
+分别列出依赖、测速、入选地区/节点、计划校验、配置导出、应用创建、运行验证的状态。只有确认应用配置已创建时才告知“请稍后重启FlClash并选择GoodCat-XXX查看效果”，不要主动重启，以免中断模型网络。若仅导出，说明尚未创建及产物路径，不用重启提醒掩盖阻塞。无需等待用户现场验证。

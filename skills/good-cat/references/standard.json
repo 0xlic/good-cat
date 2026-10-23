@@ -1,0 +1,25 @@
+{
+  "profile": {"overrides": "{\"dns\":{\"enhanced-mode\":\"redir-host\"},\"dns-override-keys\":[\"enhanced-mode\"]}"},
+  "groups": [
+    {"name":"🤖 ChatGPT","type":"url-test","definition":{"url":"https://chatgpt.com/cdn-cgi/trace","filter":""}},
+    {"name":"✨ Gemini","type":"url-test","definition":{"url":"https://gemini.google.com/","filter":""}},
+    {"name":"🚀 默认代理","type":"url-test","definition":{"url":"https://www.gstatic.com/generate_204","filter":""}},
+    {"name":"🔎节点筛选","type":"select","definition":{"hidden":true}}
+  ],
+  "rules": [
+    {"rule_action":"GEOSITE","content":"private","rule_target":"DIRECT"},
+    {"rule_action":"GEOIP","content":"LAN","rule_target":"DIRECT","no_resolve":1},
+    {"rule_action":"GEOSITE","content":"apple","rule_target":"DIRECT"},
+    {"rule_action":"GEOSITE","content":"microsoft","rule_target":"DIRECT"},
+    {"rule_action":"DOMAIN_SUFFIX","content":"chatgpt.com","rule_target":"🤖 ChatGPT"},
+    {"rule_action":"DOMAIN_SUFFIX","content":"openai.com","rule_target":"🤖 ChatGPT"},
+    {"rule_action":"DOMAIN_SUFFIX","content":"oaistatic.com","rule_target":"🤖 ChatGPT"},
+    {"rule_action":"DOMAIN_SUFFIX","content":"oaiusercontent.com","rule_target":"🤖 ChatGPT"},
+    {"rule_action":"DOMAIN_SUFFIX","content":"gemini.google.com","rule_target":"✨ Gemini"},
+    {"rule_action":"DOMAIN_SUFFIX","content":"generativelanguage.googleapis.com","rule_target":"✨ Gemini"},
+    {"rule_action":"DOMAIN_SUFFIX","content":"aistudio.google.com","rule_target":"✨ Gemini"},
+    {"rule_action":"GEOSITE","content":"cn","rule_target":"DIRECT"},
+    {"rule_action":"GEOIP","content":"CN","rule_target":"DIRECT","no_resolve":1},
+    {"rule_action":"MATCH","rule_target":"🚀 默认代理"}
+  ]
+}

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""以用户选定配置为模板，先测速再导出；不停止 FlClash、不写数据库、不调用 API。"""
+"""使用内置标准生成配置，先测速再导出；不停止 FlClash、不调用核心 API。"""
 import argparse
 import copy
 import json
@@ -28,40 +28,25 @@ def role(name):
     raise ValueError('模板包含未支持的额外策略组，请先审阅结构')
 
 
-def make_plan(state, subscription_id, name, template_id):
+def make_plan(state, subscription_id, name):
     f.require(name.startswith('GoodCat-') and name[8:].strip(), '名称必须为 GoodCat-XXX')
     subscriptions = [p for p in state['profiles'] if p['id'] == subscription_id and p['type'] != 'custom']
     f.require(len(subscriptions) == 1, '请选择存在的订阅 ID')
     label = subscriptions[0]['label']
     f.require(sum(p['label'] == label for p in state['profiles']) == 1, '订阅名称不唯一')
-    templates = [p for p in state['profiles'] if p['id'] == template_id and p['type'] == 'custom']
-    f.require(len(templates) == 1, '必须显式选择原自定义配置作为模板')
-    profile = {k: copy.deepcopy(v) for k, v in templates[0].items() if k in f.PROFILE_FIELDS}
-    profile.update(label=name)
-    if not profile.get('overrides'):
-        profile['overrides'] = '{}'
+    standard = json.loads((Path(__file__).resolve().parent.parent / 'references/standard.json').read_text(encoding='utf-8'))
+    profile = dict(standard['profile'], label=name)
     groups = []
-    for old in sorted((g for g in state['proxy_groups'] if g['profile_id'] == template_id), key=lambda g: g['order']):
-        group = {k: copy.deepcopy(v) for k, v in old.items() if k in f.GROUP_FIELDS and k != 'id'}
-        kind = role(group['name'])
-        definition = json.loads(group.get('definition') or '{}')
-        # 明确绑定所选订阅，防止 include-all-providers 引入其他机场。
-        group['use'] = f.dump([label])
-        group['proxies'] = None
-        definition.pop('include-all-providers', None)
-        definition.pop('include-all', None)
-        definition.pop('include-all-proxies', None)
-        if kind in URLS:
-            f.require(group['type'] == 'url-test', '模板的三个业务组必须是 url-test')
-            definition['filter'] = ''  # 草案：最终导出前必须以测速结果替换。
-        else:
-            f.require(group['type'] == 'select', '节点筛选必须是 select')
-        group['definition'] = f.dump(definition)
+    for i, item in enumerate(standard['groups']):
+        group = copy.deepcopy(item)
+        if role(group['name']) == '节点筛选':
+            group['definition']['exclude-filter'] = NOTICE_FILTER
+        group.update(use=f.dump([label]), proxies=None, order=f'a{i:06d}')
+        group['definition'] = f.dump(group['definition'])
         groups.append(group)
-    f.require(len(groups) == 4 and {role(g['name']) for g in groups} == set(URLS) | {'节点筛选'},
-              '模板必须恰好包含三个业务组和节点筛选组')
-    rules = [{k: copy.deepcopy(v) for k, v in r.items() if k in f.RULE_FIELDS and k != 'id'}
-             for r in sorted((r for r in state['rules'] if r['profile_id'] == template_id), key=lambda r: r['order'])]
+    rules = copy.deepcopy(standard['rules'])
+    for i, rule in enumerate(rules):
+        rule['order'] = f'a{i:06d}'
     plan = dict(version=1, base=f.digest(state), profile_id=None, profile=profile, groups=groups, rules=rules)
     f.prepare(state, plan)
     targets(plan)
@@ -172,7 +157,6 @@ def main():
     sub = parser.add_subparsers(dest='cmd', required=True)
     create = sub.add_parser('create-plan')
     create.add_argument('--subscription-id', type=int, required=True)
-    create.add_argument('--template-id', type=int, required=True)
     create.add_argument('--name', required=True)
     bench = sub.add_parser('benchmark')
     bench.add_argument('--core', type=Path)
@@ -192,7 +176,7 @@ def main():
     args = parser.parse_args()
     state = read_state(args.db)
     if args.cmd == 'create-plan':
-        output = make_plan(state, args.subscription_id, args.name, args.template_id)
+        output = make_plan(state, args.subscription_id, args.name)
     else:
         plan = json.loads(args.plan.read_text(encoding='utf-8'))
         f.prepare(state, plan)
