@@ -29,10 +29,11 @@
 
 ## 安全边界
 
-- 保持 FlClash 和当前代理运行，不退出、重启或切换出口，不在线写数据库。
+- 测速和校验期间保持当前代理运行，不切换出口、不在线写数据库。
 - 使用 Skill 内置标准配置，不参考本机其他自定义配置；先测速，再生成入选地区中每轮均不超过 600ms 的节点精确白名单。
 - 不修改已有配置、机场订阅或运行文件。未完成筛选不创建半成品，不把计划校验通过说成已生效。
-- 当前支持标准配置文件导出，但运行中应用的无中断 custom 创建尚未实现；会在继续确认前披露限制，保留最终计划，不通过退出应用写库绕过。
+- 全部准备完成后，最后询问是否允许短暂断网；确认后独立本地脚本正常退出 FlClash、备份创建 custom 并尝试重新启动，模型断连不影响本地任务继续。结果写入本地报告，用户稍后自行选择新配置验证。
+- 无法完全退出或数据库指纹变化时停止写入，不强制杀进程、不绕过检查；仍尝试重新打开应用。
 
 ## 文件
 
@@ -44,4 +45,5 @@
 - [`scripts/flclash.py`](skills/good-cat/scripts/flclash.py)：配置检查、校验、备份与保存工具。
 - [`scripts/goodcat.py`](skills/good-cat/scripts/goodcat.py)：建组计划、节点测速与地区过滤计划。
 - [`scripts/benchmark.py`](skills/good-cat/scripts/benchmark.py)：无 API 的隔离代理与 HTTPS 测速。
+- [`scripts/finalize.py`](skills/good-cat/scripts/finalize.py)：最终断网确认后的独立本地写入与重启任务。
 - [`scripts/test_flclash.py`](skills/good-cat/scripts/test_flclash.py)、[`scripts/test_goodcat.py`](skills/good-cat/scripts/test_goodcat.py)、[`scripts/test_benchmark.py`](skills/good-cat/scripts/test_benchmark.py)：合成数据与模拟网络测试。
