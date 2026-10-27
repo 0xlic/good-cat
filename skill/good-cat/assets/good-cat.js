@@ -1,5 +1,6 @@
 // good-cat — FlClash 覆写脚本，入口 main(config)。
-// 按节点名称识别国家；可分别修改下面两个数组。
+// 按节点名称识别国家；下面数组仅为模板占位，不是默认推荐。
+// Agent 必须按各服务全量实测国家排名生成替换数组，再通过 render 生成脚本；禁止直接安装此模板。
 // 保留订阅节点、proxy-providers 及 FlClash 默认 GeoSite 数据源；替换所有分组和规则。
 const CHATGPT_COUNTRIES = ["TW", "SG", "JP"];
 const CLAUDE_COUNTRIES = ["TW", "SG", "JP"];
