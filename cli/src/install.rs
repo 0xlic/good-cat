@@ -307,6 +307,15 @@ pub fn is_managed_name(name: &str) -> bool {
             .all(|c| c.is_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
+/// Journal location: Agent-local state, with a support-dir fallback for library use.
+pub fn pending_install_path(support: &Path) -> PathBuf {
+    crate::local::state_file("install.json", support.join(PENDING))
+}
+
+fn backup_root_path(support: &Path) -> PathBuf {
+    crate::local::backup_root(support.join("skill-backups"))
+}
+
 // Keep the private copy alive for the lifetime of its connection.
 pub(crate) fn snapshot(support: &Path) -> Result<(tempfile::TempDir, Connection)> {
     let support = root(support)?;
@@ -314,7 +323,9 @@ pub(crate) fn snapshot(support: &Path) -> Result<(tempfile::TempDir, Connection)
     // memory. Read a private copy (including uncheckpointed WAL) instead. Like
     // any plan, this snapshot may become stale before registration; register
     // revalidates against the stopped application's database.
-    let snapshot = tempfile::tempdir()?;
+    let snapshot = tempfile::Builder::new()
+        .prefix("good-cat-db-")
+        .tempdir_in(crate::local::temporary_root())?;
     fs::copy(
         support.join("database.sqlite"),
         snapshot.path().join("database.sqlite"),
@@ -405,7 +416,7 @@ pub fn inspect(support: &Path, name: &str) -> Result<Value> {
     Ok(
         json!({"name": name, "scripts": scripts, "active_refs": references,
         "planned_id": id, "ambiguous": scripts.len() > 1,
-        "pending_recovery": exists(&support.join(PENDING))?}),
+        "pending_recovery": exists(&pending_install_path(&support))?}),
     )
 }
 
@@ -434,10 +445,13 @@ fn atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     sync_dir(parent)
 }
 fn write_journal(support: &Path, journal: &Journal) -> Result<()> {
-    atomic(&support.join(PENDING), &serde_json::to_vec(journal)?)
+    atomic(
+        &pending_install_path(support),
+        &serde_json::to_vec(journal)?,
+    )
 }
 fn remove_journal(support: &Path) -> Result<()> {
-    fs::remove_file(support.join(PENDING))?;
+    fs::remove_file(pending_install_path(support))?;
     sync_dir(support)
 }
 fn copy_database(source: &Connection, target: &mut Connection) -> Result<()> {
@@ -566,7 +580,7 @@ fn register_impl(
         "script label must be a managed good-cat slug"
     );
     ensure!(
-        !exists(&support.join(PENDING))?,
+        !exists(&pending_install_path(&support))?,
         "pending install journal exists; recover before registering"
     );
     let source = fs::read_to_string(script).context("reading UTF-8 JavaScript")?;
@@ -581,7 +595,10 @@ fn register_impl(
     }
     let root_dir = Dir::open_ambient_dir(&support, ambient_authority())?;
     let scripts_dir = anchored_directory(&root_dir, "scripts")?;
-    let backups_dir = anchored_directory(&root_dir, "skill-backups")?;
+    let backup_root = backup_root_path(&support);
+    fs::create_dir_all(&backup_root)?;
+    regular(&backup_root, true)?;
+    let backups_dir = Dir::open_ambient_dir(&backup_root, ambient_authority())?;
     let backup_name = loop {
         let name = format!("good-cat-{:032x}", rand::random::<u128>());
         let builder = cap_std::fs::DirBuilder::new();
@@ -599,10 +616,12 @@ fn register_impl(
         }
     };
     let backup_dir = backups_dir.open_dir_nofollow(&backup_name)?;
-    let backup = support.join("skill-backups").join(&backup_name);
+    let backup = backup_root.join(&backup_name);
     // SQLite needs a pathname. Build its standalone backup in a private temp
     // directory, then publish the closed database through the anchored handle.
-    let private_backup = tempfile::tempdir()?;
+    let private_backup = tempfile::Builder::new()
+        .prefix("good-cat-backup-")
+        .tempdir_in(crate::local::temporary_root())?;
     let backup_db_path = private_backup.path().join("database.sqlite");
     let mut backup_db = Connection::open(&backup_db_path)?;
     // The backup API must run before acquiring a write transaction.
@@ -679,7 +698,7 @@ fn register_impl(
         version: 2,
         id,
         target: format!("scripts/{id}.js"),
-        backup: format!("skill-backups/{backup_name}"),
+        backup: backup_name.clone(),
         had_script,
         phase: Phase::Prepared,
         before,
@@ -715,7 +734,6 @@ fn register_impl(
         // Both logical states are pinned before either file replacement or commit.
         write_journal(&support, &journal)?;
         still_attached(&root_dir, "scripts", &scripts_dir)?;
-        still_attached(&root_dir, "skill-backups", &backups_dir)?;
         still_attached(&backups_dir, &backup_name, &backup_dir)?;
         if let Some(ref expected) = expected {
             ensure!(
@@ -732,7 +750,6 @@ fn register_impl(
         journal.phase = Phase::Replaced;
         write_journal(&support, &journal)?;
         still_attached(&root_dir, "scripts", &scripts_dir)?;
-        still_attached(&root_dir, "skill-backups", &backups_dir)?;
         still_attached(&backups_dir, &backup_name, &backup_dir)?;
         tx.commit()?;
         Ok(())
@@ -744,7 +761,6 @@ fn register_impl(
         // restore an old source over a newly detected external filesystem edit.
         if !replacement_started {
             if let Err(recovery) = still_attached(&root_dir, "scripts", &scripts_dir)
-                .and_then(|_| still_attached(&root_dir, "skill-backups", &backups_dir))
                 .and_then(|_| still_attached(&backups_dir, &backup_name, &backup_dir))
             {
                 return Err(RecoveryFailure {
@@ -753,7 +769,7 @@ fn register_impl(
                 }
                 .into());
             }
-            if exists(&support.join(PENDING))? {
+            if exists(&pending_install_path(&support))? {
                 remove_journal(&support).map_err(|e| RecoveryFailure {
                     operation: format!("install failed: {original:#}"),
                     recovery: format!("{e:#}"),
@@ -781,9 +797,10 @@ fn register_impl(
 }
 
 fn validated_journal(support: &Path) -> Result<Journal> {
-    regular(&support.join(PENDING), false)?;
-    let journal: Journal = serde_json::from_slice(&fs::read(support.join(PENDING))?)
-        .context("invalid install journal")?;
+    let journal_path = pending_install_path(support);
+    regular(&journal_path, false)?;
+    let journal: Journal =
+        serde_json::from_slice(&fs::read(journal_path)?).context("invalid install journal")?;
     ensure!(
         journal.version == 2
             && journal.before.len() == 64
@@ -796,15 +813,12 @@ fn validated_journal(support: &Path) -> Result<Journal> {
         journal.target == format!("scripts/{}.js", journal.id),
         "invalid journal target"
     );
-    // Compare exact portable relative strings, not just a lexical starts_with.
-    let name = journal
-        .backup
-        .strip_prefix("skill-backups/")
-        .context("invalid journal backup")?;
+    // The backup is a single directory name under the local backup root.
     ensure!(
-        name.starts_with("good-cat-")
-            && name.len() > "good-cat-".len()
-            && name
+        journal.backup.starts_with("good-cat-")
+            && journal.backup.len() > "good-cat-".len()
+            && journal
+                .backup
                 .bytes()
                 .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_'),
         "invalid journal backup directory"
@@ -818,7 +832,7 @@ pub fn recover(support: &Path) -> Result<Value> {
     let operation = "pending install recovery";
     let result = (|| -> Result<Value> {
         let support = root(support)?;
-        if !exists(&support.join(PENDING))? {
+        if !exists(&pending_install_path(&support))? {
             return Ok(json!({"recovered": false}));
         }
         let root_dir = Dir::open_ambient_dir(&support, ambient_authority())?;
@@ -830,15 +844,15 @@ pub fn recover(support: &Path) -> Result<Value> {
                 "scripts directory changed; manual intervention required"
             );
         }
-        let backups_dir = root_dir.open_dir_nofollow("skill-backups")?;
-        let backup_name = journal
-            .backup
-            .strip_prefix("skill-backups/")
-            .context("invalid backup directory")?;
+        let backup_root = backup_root_path(&support);
+        let backups_dir = Dir::open_ambient_dir(&backup_root, ambient_authority())?;
+        let backup_name = journal.backup.as_str();
         let backup_dir = backups_dir.open_dir_nofollow(backup_name)?;
-        let backup = support.join(&journal.backup);
+        let backup = backup_root.join(backup_name);
         // Never ask SQLite to resolve the mutable backup directory path.
-        let private_backup = tempfile::tempdir()?;
+        let private_backup = tempfile::Builder::new()
+            .prefix("good-cat-recover-")
+            .tempdir_in(crate::local::temporary_root())?;
         let backup_path = private_backup.path().join("database.sqlite");
         fs::write(
             &backup_path,
@@ -885,7 +899,6 @@ pub fn recover(support: &Path) -> Result<Value> {
             "script drift detected; manual intervention required"
         );
         still_attached(&root_dir, "scripts", &scripts_dir)?;
-        still_attached(&root_dir, "skill-backups", &backups_dir)?;
         still_attached(&backups_dir, backup_name, &backup_dir)?;
         let mut errors = Vec::new();
         let restore_db = copy_database(&source, &mut current);
@@ -904,7 +917,6 @@ pub fn recover(support: &Path) -> Result<Value> {
                 sync_anchored(&scripts_dir)?;
             }
             still_attached(&root_dir, "scripts", &scripts_dir)?;
-            still_attached(&root_dir, "skill-backups", &backups_dir)?;
             still_attached(&backups_dir, backup_name, &backup_dir)?;
             Ok(())
         })();
@@ -966,10 +978,7 @@ mod tests {
             version: 2,
             id: 1,
             target: "scripts/1.js".into(),
-            backup: format!(
-                "skill-backups/{}",
-                backup.file_name().unwrap().to_str().unwrap()
-            ),
+            backup: backup.file_name().unwrap().to_str().unwrap().to_owned(),
             had_script,
             phase: Phase::Replaced,
             before: fingerprint(&Connection::open(backup.join("database.sqlite")).unwrap())
@@ -1226,7 +1235,7 @@ mod tests {
             10
         );
         assert!(backup.exists());
-        journal.backup = "skill-backups/good-cat-../../outside".into();
+        journal.backup = "good-cat-../../outside".into();
         write_journal(dir.path(), &journal).unwrap();
         assert!(recover(dir.path())
             .unwrap_err()
@@ -1455,7 +1464,7 @@ mod tests {
         let alias = dir.path().join("skill-backups/good-cat-alias");
         symlink(&backup, &alias).unwrap();
         let journal = Journal {
-            backup: "skill-backups/good-cat-alias".into(),
+            backup: "good-cat-alias".into(),
             ..crash_journal(dir.path(), &backup, false)
         };
         write_journal(dir.path(), &journal).unwrap();
@@ -1464,10 +1473,7 @@ mod tests {
         assert!(dir.path().join(PENDING).exists());
         // Retrying with a valid prepared journal also removes newly installed JS.
         let journal = Journal {
-            backup: format!(
-                "skill-backups/{}",
-                backup.file_name().unwrap().to_str().unwrap()
-            ),
+            backup: backup.file_name().unwrap().to_str().unwrap().to_owned(),
             ..journal
         };
         write_journal(dir.path(), &journal).unwrap();

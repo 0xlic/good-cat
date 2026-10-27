@@ -12,18 +12,26 @@ fn write_exec(path: &Path, text: &str) {
     fs::write(path, text).unwrap();
     fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
 }
-fn run(script: &Path, bin: &Path, fixtures: &Path, parent: &Path, force: bool) -> Output {
+fn run(
+    script: &Path,
+    bin: &Path,
+    fixtures: &Path,
+    agent: &Path,
+    cache: &Path,
+    force: bool,
+) -> Output {
     let mut command = Command::new("/bin/bash");
     command.arg(script).args([
         "--repo",
         "EXAMPLE/GOOD-CAT",
         "--cache-dir",
-        parent.to_str().unwrap(),
+        cache.to_str().unwrap(),
     ]);
     if force {
         command.arg("--force");
     }
     command
+        .current_dir(agent)
         .env(
             "PATH",
             format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
@@ -39,6 +47,7 @@ fn downloads_verify_before_publish_and_preserve_existing_parent_and_binary() {
     let fixtures = temp.path().join("fixtures");
     let bin = temp.path().join("bin");
     let parent = temp.path().join("unrelated parent");
+    let cache = parent.join("cache");
     fs::create_dir(&fixtures).unwrap();
     fs::create_dir(&bin).unwrap();
     fs::create_dir(&parent).unwrap();
@@ -93,7 +102,7 @@ cp "$GOOD_CAT_MOCK_FIXTURES/$source" "$out"
     fs::create_dir_all(&portable).unwrap();
     let script = portable.join("install.sh");
     fs::copy(source, &script).unwrap();
-    let result = run(&script, &bin, &fixtures, &parent, false);
+    let result = run(&script, &bin, &fixtures, temp.path(), &cache, false);
     assert!(
         result.status.success(),
         "{}",
@@ -103,7 +112,8 @@ cp "$GOOD_CAT_MOCK_FIXTURES/$source" "$out"
     let executable = PathBuf::from(value["executable"].as_str().unwrap());
     assert_eq!(value["target"], "aarch64-apple-darwin");
     assert_eq!(value["sha256"], hash);
-    assert!(executable.starts_with(parent.join("good-cat").canonicalize().unwrap()));
+    assert!(executable.starts_with(cache.canonicalize().unwrap()));
+    assert_eq!(value["executable_relative"], "./unrelated parent/cache/EXAMPLE/GOOD-CAT/v0.1.0/aarch64-apple-darwin/good-cat-aarch64-apple-darwin");
     assert_eq!(
         fs::metadata(&parent).unwrap().permissions().mode() & 0o777,
         0o755
@@ -115,11 +125,11 @@ cp "$GOOD_CAT_MOCK_FIXTURES/$source" "$out"
     let original = fs::read(&executable).unwrap();
     fs::write(fixtures.join("payload"), "bad download").unwrap();
     // Existing cache is reverified and reused, without touching the bad download.
-    assert!(run(&script, &bin, &fixtures, &parent, false)
+    assert!(run(&script, &bin, &fixtures, temp.path(), &cache, false)
         .status
         .success());
     // Forced redownload fails verification but never replaces the working binary.
-    assert!(!run(&script, &bin, &fixtures, &parent, true)
+    assert!(!run(&script, &bin, &fixtures, temp.path(), &cache, true)
         .status
         .success());
     assert_eq!(fs::read(executable).unwrap(), original);

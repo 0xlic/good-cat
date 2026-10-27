@@ -3,3 +3,6 @@
 /artifacts/
 *.log
 .DS_Store
+
+.good-cat/
+.agents/

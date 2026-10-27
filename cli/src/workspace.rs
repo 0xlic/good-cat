@@ -1,4 +1,4 @@
-//! Per-flow artifacts live in a private, persistent OS temporary directory.
+//! Per-flow artifacts live under the Agent-local `.good-cat/workspaces` directory.
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::{
@@ -12,7 +12,13 @@ pub const SELECTION: &str = "selection.json";
 pub const SCRIPT: &str = "good-cat.generated.js";
 
 pub fn create() -> Result<PathBuf> {
-    let directory = tempfile::Builder::new().prefix("good-cat-").tempdir()?;
+    let parent = crate::local::home()
+        .map(|home| home.join("workspaces"))
+        .unwrap_or_else(std::env::temp_dir);
+    fs::create_dir_all(&parent)?;
+    let directory = tempfile::Builder::new()
+        .prefix("good-cat-")
+        .tempdir_in(parent)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -38,7 +44,7 @@ pub fn create() -> Result<PathBuf> {
 
 pub fn validate(path: &Path) -> Result<PathBuf> {
     let meta = fs::symlink_metadata(path)
-        .context("工作区不存在；系统可能已清理临时目录，请创建新工作区")?;
+        .context("工作区不存在；请从 Agent 目录重新运行 workspace create")?;
     if !meta.is_dir() || meta.file_type().is_symlink() {
         bail!("工作区必须是真实目录，不能是符号链接");
     }
@@ -64,9 +70,19 @@ pub fn validate(path: &Path) -> Result<PathBuf> {
 }
 
 pub fn describe(path: &Path) -> Value {
-    json!({"status":"ok","operation":"workspace.create","workspace":path,
-        "report":path.join(REPORT),"selection":path.join(SELECTION),"script":path.join(SCRIPT),
-        "temporary":true})
+    json!({
+        "status":"ok",
+        "operation":"workspace.create",
+        "workspace": crate::local::display(path),
+        "workspace_absolute": path,
+        "report": crate::local::display(&path.join(REPORT)),
+        "selection": crate::local::display(&path.join(SELECTION)),
+        "script": crate::local::display(&path.join(SCRIPT)),
+        "report_absolute": path.join(REPORT),
+        "selection_absolute": path.join(SELECTION),
+        "script_absolute": path.join(SCRIPT),
+        "local": true,
+    })
 }
 
 pub fn explicit_or_default(
@@ -90,11 +106,11 @@ pub fn explicit_or_default(
 mod tests {
     use super::*;
     #[test]
-    fn unique_private_workspaces_in_os_temp() {
+    fn unique_private_workspaces_are_created_with_a_marker() {
         let a = create().unwrap();
         let b = create().unwrap();
         assert_ne!(a, b);
-        assert!(a.starts_with(std::env::temp_dir().canonicalize().unwrap()));
+        assert!(a.join(super::MARKER).is_file());
         assert_eq!(validate(&a).unwrap(), a);
         assert_eq!(
             explicit_or_default(None, Some(&a), REPORT).unwrap(),

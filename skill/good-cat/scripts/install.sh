@@ -34,14 +34,11 @@ else
 fi
 asset=good-cat-$target
 for tool in curl plutil shasum mktemp; do command -v "$tool" >/dev/null || fail "required system tool missing: $tool"; done
+agent_dir=$(pwd -P)
 if [ -z "$cache" ]; then
-    [ -n "${HOME:-}" ] || fail 'HOME is unset; supply --cache-dir'
-    cache=$HOME/Library/Caches/good-cat
-else
-    # Custom paths are parents: never chmod the user's existing directory.
-    cache=$cache/good-cat
+    cache=$agent_dir/.good-cat/bin
 fi
-case "$cache" in /*) ;; *) cache=$PWD/$cache ;; esac
+case "$cache" in /*) ;; *) cache=$agent_dir/$cache ;; esac
 # Resolve existing ancestors before checking containment; disallow ambiguous traversal.
 case "/$cache/" in */../*|*/./*) fail 'cache path must not contain . or .. components' ;; esac
 canonical_dir() {
@@ -56,17 +53,20 @@ canonical_dir() {
 cache=$(canonical_dir "$cache") || fail 'invalid cache directory'
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 skill_dir=$(cd "$script_dir/.." && pwd -P)
-case "$cache/" in "$skill_dir/"*) fail 'cache must be outside the skill' ;; esac
-candidate=$(cd "$script_dir/../../.." && pwd -P)
-if [ -f "$candidate/cli/Cargo.toml" ] && [ "$skill_dir" = "$candidate/skill/good-cat" ]; then
-    case "$cache/" in "$candidate/"*) fail 'cache must be outside the repository' ;; esac
-fi
+# Everything must stay inside the Agent's current directory for easy cleanup.
+case "$cache/" in "$agent_dir/"*) ;; *) fail "cache must be inside the Agent directory: $agent_dir" ;; esac
+case "$cache/" in "$skill_dir/"*) fail 'cache must be outside the skill directory' ;; esac
 marker=$cache/.good-cat-release-cache
 if [ -e "$cache" ]; then
-    [ -d "$cache" ] && [ -f "$marker" ] && [ ! -L "$marker" ] || fail 'existing cache is not owned by good-cat; choose another cache parent'
-    [ "$(< "$marker")" = good-cat-release-cache-v1 ] || fail 'invalid cache marker'
+    [ -d "$cache" ] && [ ! -L "$cache" ] || fail 'cache path is not a real directory'
     [ "$(stat -f '%u' "$cache")" = "$(id -u)" ] || fail 'cache is owned by another user'
     [ "$(( 8#$(stat -f '%Lp' "$cache") & 077 ))" -eq 0 ] || fail 'existing cache permissions are too broad'
+    if [ ! -e "$marker" ]; then
+        [ -z "$(ls -A "$cache")" ] || fail 'existing cache is not owned by good-cat; choose another cache path'
+        printf 'good-cat-release-cache-v1\n' > "$marker"
+    fi
+    [ -f "$marker" ] && [ ! -L "$marker" ] || fail 'existing cache marker is invalid'
+    [ "$(< "$marker")" = good-cat-release-cache-v1 ] || fail 'invalid cache marker'
 else
     mkdir -p "$(dirname "$cache")"
     mkdir -m 700 "$cache"
@@ -180,5 +180,6 @@ printf '{"status":"ok","repository":'; json_string "$repo"
 printf ',"version":'; json_string "$version"
 printf ',"target":'; json_string "$target"
 printf ',"executable":'; json_string "$executable"
+case "$executable" in "$agent_dir/"*) printf ',"executable_relative":'; json_string "./${executable#"$agent_dir"/}" ;; esac
 printf ',"sha256":'; json_string "$sha"
 printf '}\n'

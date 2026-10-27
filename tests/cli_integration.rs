@@ -11,11 +11,22 @@ use std::{
     thread,
 };
 
-fn run(args: &[&str]) -> Output {
+fn run_in(args: &[&str], cwd: &Path) -> Output {
     Command::new(env!("CARGO_BIN_EXE_good-cat"))
+        .current_dir(cwd)
+        .args(["--home", ".good-cat"])
         .args(args)
         .output()
         .unwrap()
+}
+fn run(args: &[&str]) -> Output {
+    let cwd = tempfile::tempdir().unwrap();
+    run_in(args, cwd.path())
+}
+fn prepare_home(dir: &Path) {
+    let home = dir.join(".good-cat");
+    fs::create_dir_all(home.join("state")).unwrap();
+    fs::write(home.join(".good-cat-home.json"), r#"{"version":1}"#).unwrap();
 }
 fn decoded(out: &Output) -> Value {
     serde_json::from_slice(&out.stdout)
@@ -37,8 +48,8 @@ fn args_for(dir: &Path, prefs: &Path) -> Vec<String> {
         prefs.to_str().unwrap().into(),
     ]
 }
-fn run_owned(args: &[String]) -> Output {
-    run(&args.iter().map(String::as_str).collect::<Vec<_>>())
+fn run_owned(args: &[String], cwd: &Path) -> Output {
+    run_in(&args.iter().map(String::as_str).collect::<Vec<_>>(), cwd)
 }
 
 #[test]
@@ -53,16 +64,13 @@ fn inspect_and_controller_plan_never_write_or_leak_secret() {
     ] {
         let mut args = args_for(dir.path(), &prefs);
         args.extend(extra.iter().map(|s| s.to_string()));
-        let out = run_owned(&args);
+        let out = run_owned(&args, dir.path());
         assert!(out.status.success(), "{:?}", decoded(&out));
         assert!(!String::from_utf8_lossy(&out.stdout).contains("integration-private-secret"));
     }
     assert_eq!(fs::read(&prefs).unwrap(), original);
     assert_eq!(fs::read(dir.path().join("database.sqlite")).unwrap(), db);
-    assert!(!dir
-        .path()
-        .join(".good-cat-pending-controller.json")
-        .exists());
+    assert!(!dir.path().join(".good-cat/state/controller.json").exists());
 }
 #[test]
 fn install_plan_does_not_mutate_database_or_register() {
@@ -78,7 +86,7 @@ fn install_plan_does_not_mutate_database_or_register() {
         script.to_str().unwrap().into(),
         "--activate-current".into(),
     ]);
-    let out = run_owned(&args);
+    let out = run_owned(&args, dir.path());
     assert!(out.status.success());
     let result = decoded(&out);
     assert_eq!(result["status"], "confirmation_required");
@@ -168,7 +176,8 @@ fn unresolved_install_journal_blocks_mutations_before_process_control() {
     let (dir, prefs) = fixture();
     let script = dir.path().join("generated.js");
     fs::write(&script, "function main(c){return c;}").unwrap();
-    fs::write(dir.path().join(".good-cat-pending-install.json"), "{}").unwrap();
+    prepare_home(dir.path());
+    fs::write(dir.path().join(".good-cat/state/install.json"), "{}").unwrap();
     let before = fs::read(&prefs).unwrap();
     for extra in [
         vec!["controller", "enable", "--apply"],
@@ -183,7 +192,7 @@ fn unresolved_install_journal_blocks_mutations_before_process_control() {
     ] {
         let mut args = args_for(dir.path(), &prefs);
         args.extend(extra.iter().map(|s| s.to_string()));
-        let out = run_owned(&args);
+        let out = run_owned(&args, dir.path());
         assert!(!out.status.success());
         let value = decoded(&out);
         assert_eq!(value["status"], "error");
@@ -237,6 +246,8 @@ fn speedtest_against_fake_api_all_nodes_per_url() {
         .current_dir(dir.path())
         .env("MIHOMO_SECRET", "fixture-secret")
         .args([
+            "--home",
+            ".good-cat",
             "speedtest",
             "--controller",
             &format!("http://{address}"),
@@ -248,11 +259,16 @@ fn speedtest_against_fake_api_all_nodes_per_url() {
     assert!(out.status.success(), "{:?}", decoded(&out));
     thread.join().unwrap();
     let result = decoded(&out);
-    let workspace = PathBuf::from(result["workspace"].as_str().unwrap());
-    assert!(workspace.starts_with(std::env::temp_dir().canonicalize().unwrap()));
-    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    let workspace = PathBuf::from(result["workspace_absolute"].as_str().unwrap());
+    assert!(workspace.starts_with(
+        dir.path()
+            .join(".good-cat/workspaces")
+            .canonicalize()
+            .unwrap()
+    ));
     let report: Value =
-        serde_json::from_slice(&fs::read(result["output"].as_str().unwrap()).unwrap()).unwrap();
+        serde_json::from_slice(&fs::read(result["output_absolute"].as_str().unwrap()).unwrap())
+            .unwrap();
     fs::remove_dir_all(workspace).unwrap();
     assert_eq!(report["rounds"], 3);
     assert_eq!(report["aggregation"], "median_all_success");

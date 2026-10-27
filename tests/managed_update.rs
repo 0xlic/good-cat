@@ -27,9 +27,16 @@ fn fixture(label: &str) -> (tempfile::TempDir, PathBuf) {
     (dir, prefs)
 }
 
+fn prepare_home(support: &Path) {
+    let home = support.join(".good-cat");
+    fs::create_dir_all(home.join("state")).unwrap();
+    fs::write(home.join(".good-cat-home.json"), r#"{"version":1}"#).unwrap();
+}
+
 fn invoke(support: &Path, prefs: &Path, work: &Path, args: &[&str]) -> (bool, Value) {
     let out = Command::new(env!("CARGO_BIN_EXE_good-cat"))
-        .args(["--json", "--support-dir"])
+        .current_dir(support)
+        .args(["--json", "--home", ".good-cat", "--support-dir"])
         .arg(support.canonicalize().unwrap())
         .arg("--preferences")
         .arg(prefs)
@@ -54,7 +61,8 @@ fn managed_export_and_plan_are_offline_and_binding_guard_precedes_stop() {
     let before = fs::read(dir.path().join("database.sqlite")).unwrap();
     let source = fs::read(dir.path().join("scripts/7.js")).unwrap();
     let inspected = Command::new(env!("CARGO_BIN_EXE_good-cat"))
-        .args(["--json", "--support-dir"])
+        .current_dir(dir.path())
+        .args(["--json", "--home", ".good-cat", "--support-dir"])
         .arg(dir.path())
         .arg("--preferences")
         .arg(&prefs)
@@ -138,10 +146,11 @@ fn unmanaged_and_legacy_names_never_export_or_install() {
 #[test]
 fn update_requires_workspace_and_refuses_pending_journals() {
     let (dir, prefs) = fixture("good-cat-fixture");
+    prepare_home(dir.path());
     let work = good_cat::workspace::create().unwrap();
     for (journal, recovery) in [
-        (".good-cat-pending-install.json", "recover"),
-        (".good-cat-pending-controller.json", "controller restore"),
+        (".good-cat/state/install.json", "recover"),
+        (".good-cat/state/controller.json", "controller restore"),
     ] {
         fs::write(dir.path().join(journal), "{}").unwrap();
         for args in [
@@ -159,7 +168,8 @@ fn update_requires_workspace_and_refuses_pending_journals() {
         fs::remove_file(dir.path().join(journal)).unwrap();
     }
     let out = Command::new(env!("CARGO_BIN_EXE_good-cat"))
-        .arg("--support-dir")
+        .current_dir(dir.path())
+        .args(["--home", ".good-cat", "--support-dir"])
         .arg(dir.path())
         .arg("current-script")
         .output()

@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use fs2::FileExt;
 use serde_json::{json, Value};
 use std::{
@@ -95,12 +95,16 @@ impl Lock {
         if !support.is_dir() {
             bail!("FlClash 数据目录不存在");
         }
+        let path = crate::local::state_file("good-cat.lock", support.join(".good-cat.lock"));
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
-            .open(support.join(".good-cat.lock"))?;
+            .open(path)?;
         file.try_lock_exclusive()
             .context("另一个 good-cat 正在修改 FlClash")?;
         Ok(Self { _file: file })
@@ -109,8 +113,8 @@ impl Lock {
 
 // Bounded native helper execution; output is private and never included in errors.
 pub fn command(program: &str, args: &[&str], timeout: Duration) -> Result<(i32, Vec<u8>)> {
-    let output = tempfile::tempfile()?;
-    let error = tempfile::tempfile()?;
+    let output = tempfile::tempfile_in(crate::local::temporary_root())?;
+    let error = tempfile::tempfile_in(crate::local::temporary_root())?;
     let mut child = Command::new(program)
         .args(args)
         .stdin(Stdio::null())
@@ -165,37 +169,197 @@ pub fn running() -> Result<bool> {
     bail!("当前系统不支持 FlClash 进程控制")
 }
 
-pub fn app_path(explicit: Option<&Path>) -> Result<PathBuf> {
-    if let Some(p) = explicit {
-        if !p.exists() {
-            bail!("指定的 FlClash 应用不存在");
-        }
-        return Ok(p.to_owned());
-    }
+fn validate_app(path: &Path) -> Result<PathBuf> {
+    let path = fs::canonicalize(path).context("FlClash 应用路径不存在")?;
     if cfg!(target_os = "macos") {
-        let app = PathBuf::from("/Applications/FlClash.app");
-        if app.exists() {
-            return Ok(app);
-        }
+        ensure!(path.is_dir(), "macOS 的 --app 必须指向 FlClash.app");
+        ensure!(
+            path.extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.eq_ignore_ascii_case("app")),
+            "macOS 的 --app 必须指向 .app 应用包"
+        );
+    } else if cfg!(windows) {
+        ensure!(path.is_file(), "Windows 的 --app 必须指向 FlClash.exe");
+        ensure!(
+            path.extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.eq_ignore_ascii_case("exe")),
+            "Windows 的 --app 必须指向 .exe"
+        );
+    } else {
+        bail!("当前系统不支持 FlClash 应用路径");
     }
-    if cfg!(windows) {
-        // Process path is obtained before quitting, including portable installations.
-        if let Ok((0, bytes)) = command("powershell.exe", &["-NoProfile", "-NonInteractive", "-Command", "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Get-Process -Name FlClash -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Path"], Duration::from_secs(10)) {
-            let p = PathBuf::from(String::from_utf8_lossy(&bytes).trim().trim_start_matches('\u{feff}'));
-            if p.is_file() { return Ok(p); }
-        }
-        for key in ["LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)"] {
-            if let Some(base) = std::env::var_os(key) {
-                for suffix in ["FlClash/FlClash.exe", "Programs/FlClash/FlClash.exe"] {
-                    let p = PathBuf::from(&base).join(suffix);
-                    if p.is_file() {
-                        return Ok(p);
+    Ok(path)
+}
+
+fn push_candidate(candidates: &mut Vec<PathBuf>, path: impl AsRef<Path>) {
+    let path = path.as_ref();
+    let Ok(path) = fs::canonicalize(path) else {
+        return;
+    };
+    let valid = if cfg!(target_os = "macos") {
+        path.is_dir()
+            && path
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.eq_ignore_ascii_case("app"))
+            && !path.components().any(|part| part.as_os_str() == ".Trash")
+    } else if cfg!(windows) {
+        path.is_file()
+            && path
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.eq_ignore_ascii_case("exe"))
+    } else {
+        false
+    };
+    if valid && !candidates.contains(&path) {
+        candidates.push(path);
+    }
+}
+
+/// Discover installed apps without assuming a standard installation directory.
+/// Running process, LaunchServices/Spotlight on macOS, and process/PATH/registry/
+/// Start Menu on Windows are consulted. No path is guessed from a package manager.
+pub fn app_candidates() -> Result<Vec<PathBuf>> {
+    let mut candidates = Vec::new();
+    if cfg!(target_os = "macos") {
+        if let Ok((0, bytes)) = command(
+            "/usr/bin/lsappinfo",
+            &["find", "bundleID=com.follow.clash"],
+            Duration::from_secs(5),
+        ) {
+            if let Some(asn) = String::from_utf8_lossy(&bytes)
+                .lines()
+                .find(|line| line.starts_with("ASN:"))
+            {
+                if let Ok((0, info)) = command(
+                    "/usr/bin/lsappinfo",
+                    &["info", "-only", "bundlepath", asn.trim()],
+                    Duration::from_secs(5),
+                ) {
+                    if let Some(path) = String::from_utf8_lossy(&info)
+                        .split("\"LSBundlePath\"=\"")
+                        .nth(1)
+                        .and_then(|value| value.strip_suffix('"'))
+                    {
+                        push_candidate(&mut candidates, path);
                     }
                 }
             }
         }
+        if let Ok((0, bytes)) = command(
+            "/usr/bin/osascript",
+            &[
+                "-e",
+                "POSIX path of (path to application id \"com.follow.clash\")",
+            ],
+            Duration::from_secs(5),
+        ) {
+            let path = String::from_utf8_lossy(&bytes);
+            push_candidate(&mut candidates, path.trim());
+        }
+        if let Ok((0, bytes)) = command(
+            "/usr/bin/mdfind",
+            &["kMDItemCFBundleIdentifier == 'com.follow.clash'"],
+            Duration::from_secs(5),
+        ) {
+            for line in String::from_utf8_lossy(&bytes).lines() {
+                push_candidate(&mut candidates, line.trim());
+            }
+        }
+    } else if cfg!(windows) {
+        let script = r#"
+$ErrorActionPreference = 'SilentlyContinue'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$items = @()
+$process = Get-Process -Name FlClash | Select-Object -First 1 -ExpandProperty Path
+if ($process) { $items += $process }
+$command = Get-Command FlClash.exe
+if ($command) { $items += $command.Source }
+$appPaths = @(
+  'HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths\FlClash.exe',
+  'HKLM:\Software\Microsoft\Windows\CurrentVersion\App Paths\FlClash.exe',
+  'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\FlClash.exe'
+)
+foreach ($key in $appPaths) {
+  $value = (Get-ItemProperty -LiteralPath $key).'(default)'
+  if ($value) { $items += $value }
+}
+$shell = New-Object -ComObject WScript.Shell
+$roots = @(
+  (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'),
+  (Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs'),
+  (Join-Path $env:USERPROFILE 'Desktop')
+)
+foreach ($root in $roots) {
+  Get-ChildItem -LiteralPath $root -Filter 'FlClash*.lnk' -Recurse |
+    ForEach-Object {
+      $target = $shell.CreateShortcut($_.FullName).TargetPath
+      if ($target) { $items += $target }
     }
-    bail!("找不到 FlClash，请用 --app 指定应用路径")
+}
+$items | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } | Sort-Object -Unique
+"#;
+        if let Ok((0, bytes)) = command(
+            "powershell.exe",
+            &["-NoProfile", "-NonInteractive", "-Command", script],
+            Duration::from_secs(15),
+        ) {
+            for line in String::from_utf8_lossy(&bytes)
+                .trim_start_matches('\u{feff}')
+                .lines()
+            {
+                push_candidate(&mut candidates, line.trim());
+            }
+        }
+    } else {
+        bail!("当前系统不支持 FlClash 应用发现");
+    }
+    Ok(candidates)
+}
+
+/// Report the selected app and alternatives. Ambiguity is left for the Agent/user
+/// to resolve via `--app`; this function never silently chooses between installs.
+pub fn app_info(explicit: Option<&Path>) -> Result<Value> {
+    if let Some(path) = explicit {
+        let path = validate_app(path)?;
+        return Ok(
+            json!({"path": path, "source": "explicit", "candidates": [path], "ambiguous": false}),
+        );
+    }
+    let candidates = app_candidates()?;
+    let path = if candidates.len() == 1 {
+        Some(candidates[0].clone())
+    } else {
+        None
+    };
+    Ok(json!({
+        "path": path,
+        "source": if candidates.is_empty() { "not_found" } else if candidates.len() == 1 { "detected" } else { "ambiguous" },
+        "candidates": candidates,
+        "ambiguous": candidates.len() > 1,
+    }))
+}
+
+pub fn app_path(explicit: Option<&Path>) -> Result<PathBuf> {
+    if let Some(path) = explicit {
+        return validate_app(path);
+    }
+    let candidates = app_candidates()?;
+    match candidates.as_slice() {
+        [path] => Ok(path.clone()),
+        [] => bail!("未自动发现 FlClash 安装位置；请向用户确认安装路径并使用 --app 指定"),
+        _ => bail!(
+            "发现多个 FlClash 安装位置，必须确认后使用 --app 指定：{}",
+            candidates
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
 }
 
 fn wait(expected: bool, timeout: Duration) -> Result<()> {
@@ -271,7 +435,7 @@ pub fn timestamp() -> u64 {
 }
 
 pub fn backup_dir(support: &Path) -> Result<PathBuf> {
-    let root = support.join("skill-backups");
+    let root = crate::local::backup_root(support.join("skill-backups"));
     fs::create_dir_all(&root)?;
     #[cfg(unix)]
     {
@@ -280,13 +444,15 @@ pub fn backup_dir(support: &Path) -> Result<PathBuf> {
     }
     let temp = tempfile::Builder::new()
         .prefix(&format!("good-cat-{}-", timestamp()))
-        .tempdir_in(root)?;
+        .tempdir_in(&root)?;
     let path = temp.keep();
     sync_dir(&path)?;
     if let Some(parent) = path.parent() {
         sync_dir(parent)?;
     }
-    sync_dir(support)?;
+    if let Some(parent) = root.parent() {
+        sync_dir(parent)?;
+    }
     Ok(path)
 }
 
@@ -528,6 +694,41 @@ mod tests {
         let outer: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
         assert_eq!(outer["other"], "preserved");
     }
+    #[cfg(any(target_os = "macos", windows))]
+    #[test]
+    fn explicit_app_path_is_validated_and_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        #[cfg(target_os = "macos")]
+        let app = {
+            let app = dir.path().join("FlClash.app");
+            fs::create_dir(&app).unwrap();
+            app
+        };
+        #[cfg(windows)]
+        let app = {
+            let app = dir.path().join("FlClash.exe");
+            fs::write(&app, []).unwrap();
+            app
+        };
+        let expected = app.canonicalize().unwrap();
+        let info = app_info(Some(&app)).unwrap();
+        assert_eq!(info["source"], "explicit");
+        assert_eq!(PathBuf::from(info["path"].as_str().unwrap()), expected);
+        assert_eq!(app_path(Some(&app)).unwrap(), expected);
+        let wrong = dir.path().join(if cfg!(windows) {
+            "FlClash.app"
+        } else {
+            "FlClash.exe"
+        });
+        if cfg!(windows) {
+            fs::create_dir(&wrong).unwrap();
+        } else {
+            fs::write(&wrong, []).unwrap();
+        }
+        assert!(app_info(Some(&wrong)).is_err());
+        assert!(app_path(Some(&dir.path().join("missing"))).is_err());
+    }
+
     #[test]
     fn locks_release_automatically() {
         let dir = tempfile::tempdir().unwrap();

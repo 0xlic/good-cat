@@ -12,11 +12,18 @@ fn workspace_and_render_are_independent_of_cwd() {
         .unwrap();
     assert!(result.status.success());
     let value: Value = serde_json::from_slice(&result.stdout).unwrap();
-    let workspace = PathBuf::from(value["workspace"].as_str().unwrap());
-    assert!(workspace.starts_with(std::env::temp_dir().canonicalize().unwrap()));
-    assert!(!workspace.starts_with(unrelated.path()));
-    let selection = PathBuf::from(value["selection"].as_str().unwrap());
-    let report = PathBuf::from(value["report"].as_str().unwrap());
+    let workspace = PathBuf::from(value["workspace_absolute"].as_str().unwrap());
+    let expected = unrelated.path().join(".good-cat/workspaces");
+    assert!(workspace.starts_with(expected.canonicalize().unwrap()));
+    assert_eq!(
+        value["workspace"],
+        format!(
+            "./.good-cat/workspaces/{}",
+            workspace.file_name().unwrap().to_str().unwrap()
+        )
+    );
+    let selection = PathBuf::from(value["selection_absolute"].as_str().unwrap());
+    let report = PathBuf::from(value["report_absolute"].as_str().unwrap());
     fs::write(
         &selection,
         json!({"chatgpt":["TW"],"claude":["JP"]}).to_string(),
@@ -30,7 +37,7 @@ fn workspace_and_render_are_independent_of_cwd() {
         .current_dir(unrelated.path())
         .args([
             "--workspace",
-            workspace.to_str().unwrap(),
+            value["workspace"].as_str().unwrap(),
             "render",
             "--json",
         ])
@@ -43,8 +50,8 @@ fn workspace_and_render_are_independent_of_cwd() {
     );
     let rendered: Value = serde_json::from_slice(&result.stdout).unwrap();
     assert_eq!(rendered["output"], value["script"]);
-    assert!(PathBuf::from(value["script"].as_str().unwrap()).is_file());
-    assert_eq!(fs::read_dir(unrelated.path()).unwrap().count(), 0);
+    assert!(PathBuf::from(value["script_absolute"].as_str().unwrap()).is_file());
+    assert_eq!(fs::read_dir(unrelated.path()).unwrap().count(), 1);
     fs::remove_dir_all(workspace).unwrap();
 }
 
@@ -59,5 +66,6 @@ fn missing_workspace_does_not_fall_back_to_cwd() {
     assert!(!result.status.success());
     let value: Value = serde_json::from_slice(&result.stdout).unwrap();
     assert!(value["error"].as_str().unwrap().contains("--workspace"));
-    assert_eq!(fs::read_dir(unrelated.path()).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(unrelated.path()).unwrap().count(), 1);
+    assert!(unrelated.path().join(".good-cat").is_dir());
 }

@@ -13,7 +13,9 @@ fn install_defaults_to_current_subscription_but_register_only_opts_out() {
     fs::write(&script, "function main(c){return c;}").unwrap();
     for register_only in [false, true] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_good-cat"));
-        command.args([
+        command.current_dir(dir.path()).args([
+            "--home",
+            ".good-cat",
             "--support-dir",
             dir.path().to_str().unwrap(),
             "--preferences",
@@ -54,7 +56,10 @@ fn inspect_exposes_selected_subscription_label_without_url_or_secret() {
     let prefs = dir.path().join("preferences.json");
     fs::write(&prefs,json!({"flutter.config":json!({"currentProfileId":123,"patchClashConfig":{"external-controller":"","secret":"secret-not-for-output"}}).to_string()}).to_string()).unwrap();
     let result = Command::new(env!("CARGO_BIN_EXE_good-cat"))
+        .current_dir(dir.path())
         .args([
+            "--home",
+            ".good-cat",
             "--support-dir",
             dir.path().to_str().unwrap(),
             "--preferences",
@@ -83,7 +88,10 @@ fn inspect_exposes_selected_subscription_label_without_url_or_secret() {
     let script = dir.path().join("candidate.js");
     fs::write(&script, "function main(c){return c;}").unwrap();
     let result = Command::new(env!("CARGO_BIN_EXE_good-cat"))
+        .current_dir(dir.path())
         .args([
+            "--home",
+            ".good-cat",
             "--support-dir",
             dir.path().to_str().unwrap(),
             "--preferences",

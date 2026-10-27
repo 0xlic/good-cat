@@ -4,7 +4,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string] $Repo,
     [string] $Version = 'latest',
-    [string] $CacheDir = $(if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'good-cat' }),
+    [string] $CacheDir = '',
     [switch] $Force
 )
 
@@ -91,12 +91,15 @@ function Get-SourceDirectory([string] $Path) {
 
 function Assert-CachePath([string] $Path) {
     $full = Get-CanonicalPath $Path
-    foreach ($protected in @($script:skillRoot, $script:repositoryRoot)) {
-        if ($protected -and ($full.Equals($protected, [StringComparison]::OrdinalIgnoreCase) -or
-            $full.StartsWith($protected.TrimEnd('\') + [IO.Path]::DirectorySeparatorChar,
-                [StringComparison]::OrdinalIgnoreCase))) {
-            throw "Cache must be outside the repository and skill: $full"
-        }
+    if (-not $script:agentRoot -or $full.Equals($script:agentRoot, [StringComparison]::OrdinalIgnoreCase) -or
+        -not $full.StartsWith($script:agentRoot.TrimEnd('\') + [IO.Path]::DirectorySeparatorChar,
+            [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Cache must be a dedicated path inside the Agent directory: $($script:agentRoot)"
+    }
+    if ($script:skillRoot -and ($full.Equals($script:skillRoot, [StringComparison]::OrdinalIgnoreCase) -or
+        $full.StartsWith($script:skillRoot.TrimEnd('\') + [IO.Path]::DirectorySeparatorChar,
+            [StringComparison]::OrdinalIgnoreCase))) {
+        throw "Cache must be outside the skill directory: $full"
     }
     Assert-NoReparse $full
 }
@@ -274,39 +277,38 @@ namespace GoodCatBootstrap {
         $description = if ($nativeMachine -eq 0xAA64) { 'ARM64' } else { "machine code $nativeMachine" }
         throw "Unsupported native Windows OS architecture: $description. Only x64 is supported; ARM64 is not supported."
     }
+    $script:agentRoot = Get-CanonicalPath (Get-Location).ProviderPath
     if ([string]::IsNullOrWhiteSpace($CacheDir)) {
-        throw 'LOCALAPPDATA is unavailable; provide -CacheDir outside the repository.'
+        $CacheDir = Join-Path $script:agentRoot '.good-cat\bin'
     }
-    # Reject alternate streams, reparse points, Win32 aliases and repository-local caches.
-    if ($PSBoundParameters.ContainsKey('CacheDir')) {
-        # The custom argument is a parent; never replace ACLs on that directory.
-        $CacheDir = Join-Path $CacheDir 'good-cat'
-    }
+    # Reject alternate streams, reparse points and Win32 aliases.
     $cacheRoot = Get-CanonicalPath $CacheDir
     $script:skillRoot = Get-SourceDirectory (Join-Path $PSScriptRoot '..')
-    $candidate = Get-SourceDirectory (Join-Path $PSScriptRoot '..\..\..')
-    $script:repositoryRoot = $null
-    if ([IO.File]::Exists((Join-Path $candidate 'cli\Cargo.toml')) -and
-        $script:skillRoot.Equals((Join-Path $candidate 'skill\good-cat'), [StringComparison]::OrdinalIgnoreCase)) {
-        $script:repositoryRoot = $candidate
-    }
     Assert-CachePath $cacheRoot
     $marker = Join-Path $cacheRoot '.good-cat-release-cache'
     if ([IO.Directory]::Exists($cacheRoot)) {
-        if (-not [IO.File]::Exists($marker) -or [IO.File]::ReadAllText($marker).Trim() -cne 'good-cat-release-cache-v1') {
-            throw 'Existing cache is not owned by good-cat; choose another cache parent.'
+        Assert-NoReparse $cacheRoot
+        if (-not [IO.File]::Exists($marker)) {
+            if ((Get-ChildItem -LiteralPath $cacheRoot -Force | Select-Object -First 1)) {
+                throw 'Existing cache is not owned by good-cat; choose another cache path.'
+            }
+            [IO.File]::WriteAllText($marker, 'good-cat-release-cache-v1', [Text.Encoding]::ASCII)
+            Set-PrivateAccess $cacheRoot $true
         }
         Assert-NoReparse $marker
+        if ([IO.File]::ReadAllText($marker).Trim() -cne 'good-cat-release-cache-v1') {
+            throw 'Invalid cache marker.'
+        }
         $identity = [Security.Principal.WindowsIdentity]::GetCurrent().User
         $acl = Get-Acl -LiteralPath $cacheRoot
         $ownerSid = $acl.GetOwner([Security.Principal.SecurityIdentifier])
         if ($ownerSid.Value -ne $identity.Value -or -not $acl.AreAccessRulesProtected) {
-            throw 'Existing cache ownership or ACL is not private; choose another cache parent.'
+            throw 'Existing cache ownership or ACL is not private; choose another cache path.'
         }
         foreach ($rule in $acl.Access) {
             if ($rule.AccessControlType -eq 'Allow' -and
                 $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -ne $identity.Value) {
-                throw 'Existing cache grants access to another identity; choose another cache parent.'
+                throw 'Existing cache grants access to another identity; choose another cache path.'
             }
         }
     }
@@ -385,6 +387,7 @@ namespace GoodCatBootstrap {
         version = $tag
         target = $target
         executable = $executable
+        executable_relative = '.' + $executable.Substring($script:agentRoot.Length)
         sha256 = $expectedHash
     }
 } catch {

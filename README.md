@@ -14,7 +14,20 @@ good-cat 让 Agent 帮你管理 FlClash：为 ChatGPT、Claude 等服务挑选�
 请安装并使用 good-cat：https://github.com/0xlic/good-cat 帮我优化代理网络。
 ```
 
-下载工具、测速、分析结果、生成和安装配置，都交给 Agent。**不用手动下载文件或输入命令**，你只需查看建议，在关键步骤回复确认。
+下载工具、测速、分析结果、生成和安装配置，都交给 Agent。**不用手动下载文件或输入命令**，你只需查看建议，在关键步骤回复确认。Agent 会先确认 FlClash 的实际安装位置，支持自定义目录和便携版。
+
+所有由 good-cat 创建的内容都留在当前项目目录，不进行全局安装：
+
+```text
+.agents/skills/good-cat/   项目本地 Skill
+.good-cat/bin/             CLI
+.good-cat/workspaces/      测速与生成文件
+.good-cat/tmp/             临时文件
+.good-cat/backups/         配置备份
+.good-cat/state/           锁和恢复日志
+```
+
+不再使用用户缓存、系统临时目录或 FlClash 数据目录保存这些工具文件。完成后删除 `.good-cat/` 和项目本地 Skill 即可清理；FlClash 自身的配置、数据库和订阅仍保存在 FlClash 数据目录。
 
 ## 它会做什么
 

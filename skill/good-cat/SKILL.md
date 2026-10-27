@@ -10,44 +10,67 @@ metadata:
 
 ## 入口和边界
 
-- Skill 不包含平台二进制。按下文引导从用户指定的 GitHub 来源仓库安装 CLI，保存安装器返回的 `executable` 绝对路径；不向 Skill 目录写二进制，不自动安装编译环境，不回退到 Python。
+- **禁止全局安装。** Skill 必须放在当前 Agent 目录内的项目本地技能目录，例如 `.agents/skills/good-cat`；不得写入 `~/.agents/skills`、全局 npm 目录或其他用户级位置。CLI、缓存、工作区、临时文件、备份和状态全部放在当前 Agent 目录的 `.good-cat/` 下。
+- Skill 不包含平台二进制。按下文从用户指定的 GitHub 来源仓库安装 CLI；不向 Skill 目录写二进制，不自动安装编译环境，不回退到 Python。
 - 新安装使用模板 `assets/good-cat.js`，生成时显式传 `--template` 指向当前 Skill 的资源，避免缓存 CLI 与 Skill 版本偏差。已有脚本更新必须先导出当前受管脚本，由 Agent 按用户请求确定最小修改范围；仅调整国家时只改对应数组，不用完整模板覆盖现有脚本。规则或分组结构调整也必须在预览中明确说明并获得确认，不碰无关内容。
-- 以下命令中的 `<CLI>` 表示该可执行文件的绝对路径。产物在 CLI 创建的系统临时工作区，**不写 Skill 目录或当前工作目录**；`<WORKSPACE>` 表示本次创建后返回的真实绝对路径，不可猜测固定的 `/tmp` 路径。
+- 所有命令都在 `<AGENT_DIR>` 执行。`<CLI>` 使用安装器返回的 `executable_relative`（或 `executable`），位于 `./.good-cat/bin/`；不要加入全局 PATH。`<WORKSPACE>` 使用 `workspace create` 返回的相对 `workspace` 路径。
 - 命令输出为 JSON，诊断/断网提示写 stderr；检查退出码和 `status`，不能把计划当作已执行。不要解析人类格式的终端表格。
 - 不读取或输出 Secret 给模型。CLI 自行从 FlClash 设置读取认证；不修改 Shell 或系统环境变量，不在参数中传密钥。高级外部 API 模式才使用已有的 `MIHOMO_SECRET` 环境变量。
 
 ## 首次运行：识别平台并从 Release 安装 CLI
 
-1. 用户只需提供仓库链接，安装由 Agent 完成，不要求用户执行安装命令。正式来源是 `https://github.com/0xlic/good-cat`，默认使用 `0xlic/good-cat`。读取该来源的 `skill/good-cat/SKILL.md`，将同一版本的 `assets/`、`scripts/` 和说明安装到本机 Agent 的 Skill 资源目录，再下载对应平台 CLI。可使用 GitHub 内容接口或可信来源的原始文件，不依赖包管理器。若用户明确指定 fork 或其他可信安装来源，则使用对应 `OWNER/REPO`，不要猜测同名第三方项目。
+1. 用户只需提供仓库链接，安装由 Agent 完成，不要求用户执行安装命令。正式来源是 `https://github.com/0xlic/good-cat`，默认使用 `0xlic/good-cat`。读取该来源的 `skill/good-cat/SKILL.md`，把同一版本的 `assets/`、`scripts/` 和说明安装到当前项目本地的 `.agents/skills/good-cat`；若 Agent 直接从仓库工作，也可使用仓库内的 `skill/good-cat`。不得全局安装。再运行项目本地安装脚本下载 CLI。可使用 GitHub 内容接口或可信来源的原始文件，不依赖包管理器。若用户明确指定 fork 或其他可信安装来源，则使用对应 `OWNER/REPO`，不要猜测同名第三方项目。
 2. 确认本机系统、原生架构。macOS 运行下方 Bash 安装器；Windows 运行 PowerShell 安装器。只支持 macOS arm64/amd64、Windows x64，不静默选择其他架构模拟运行。
 
-macOS：
+macOS（从 `<AGENT_DIR>` 运行）：
 
 ```sh
-bash "<SKILL_DIR>/scripts/install.sh" --repo 0xlic/good-cat
+bash ".agents/skills/good-cat/scripts/install.sh" --repo 0xlic/good-cat
 ```
 
-Windows：
+Windows（从 `<AGENT_DIR>` 运行）：
 
 ```powershell
-powershell.exe -NoProfile -File "<SKILL_DIR>\scripts\install.ps1" -Repo 0xlic/good-cat
+powershell.exe -NoProfile -File ".agents\skills\good-cat\scripts\install.ps1" -Repo 0xlic/good-cat
 ```
 
-3. 安装器按平台下载指定仓库的最新稳定 Release 和 `SHA256SUMS`，固定同一 tag、校验后原子写入用户缓存。可用 `--version` / `-Version` 固定版本；Skill 若固定 tag，CLI 也应使用该 tag。版本或平台不可用时报告失败，不绕过校验。
-4. 读取 JSON 中的 `executable`、`version`、`target`、`sha256`，把 `executable` 作为下文 `<CLI>`；调用 `<CLI> --version` 核对。路径有空格需正确引用，PowerShell 使用 `& "<CLI>" ...`。同一流程复用路径，不每个子命令都重装。
+3. 安装器把指定 Release 和 `SHA256SUMS` 下载到 `./.good-cat/bin/`，固定同一 tag、校验后原子写入。自定义缓存也必须在当前 Agent 目录内。可用 `--version` / `-Version` 固定版本；Skill 若固定 tag，CLI 也应使用该 tag。版本或平台不可用时报告失败，不绕过校验。
+4. 读取 JSON 中的 `executable_relative`、`executable`、`version`、`target`、`sha256`，优先把 `executable_relative` 作为下文 `<CLI>`；调用 `<CLI> --version` 核对。路径有空格需正确引用，PowerShell 使用 `& "<CLI>" ...`。同一流程复用路径，不每个子命令都重装。
 5. 不使用 `curl | sh`、不修改全局 PATH，不擅自关闭 Gatekeeper 或更改全局执行策略。校验和不是维护者身份签名，来源仓库必须可信。系统安全策略阻止执行时向用户说明。
 
 整个安装和运行流程由 Agent 串联，用户只需查看结果并在涉及断网或配置变更时确认；不向用户暴露平台下载、缓存路径或内部命令细节。
 
-## 0. 创建本次流程的临时工作区
+## 确认 FlClash 安装位置
+
+不要假设 FlClash 安装在 `/Applications`、`Program Files` 等固定目录，也不要自行全盘搜索或执行来源不明的程序。
+
+1. 执行 `inspect --json`，读取 `app`：`path` 是唯一确认的安装路径，`candidates` 是系统发现的候选，`ambiguous` 表示发现多个安装。
+2. `path` 唯一时，在方案中明确展示该路径，后续所有可能停止/启动应用的命令都显式传全局 `--app "<path>"`。这既是模型确认，也避免运行时自动选错副本。
+3. `path` 为 `null`、`not_found` 或 `ambiguous` 时，先让用户确认实际使用的 FlClash 位置：macOS 提供 `.app` 路径，Windows 提供 `FlClash.exe` 路径。可以用 `candidates` 让用户选择，但不能替用户猜测；确认后再传 `--app`。
+4. 用户使用便携版、自定义目录或自定义安装器时，以用户确认和系统进程/LaunchServices/注册表/开始菜单发现结果为准。macOS `--app` 必须是 `.app` 目录，Windows 必须是 `.exe` 文件。
+5. `controller enable/restore`、`install`、`recover` 的预览显示 `app.path`；`inspect.layout` 显示所有本地目录。若预览没有可确认路径，停止并先解决路径问题。不要在断网操作后才发现路径错误。
+
+CLI 会优先检查运行中的 FlClash，再使用平台原生索引；发现多个安装不会自动选择，必须由 Agent/用户确认 `--app`。
+
+## 0. 创建本次流程的本地工作区
 
 ```sh
 <CLI> workspace create --json
 ```
 
-保存输出中的 `workspace`、`report`、`selection`、`script` 绝对路径。每次完整流程创建一个独立工作区，之后跨命令、跨用户确认都使用同一个 `--workspace "<WORKSPACE>"`，不要把上次流程的文件混进来。
+保存输出中的相对 `workspace`、`report`、`selection`、`script`（`*_absolute` 仅用于工具调试）。每次完整流程创建一个独立工作区，之后跨命令、跨用户确认都使用同一个 `--workspace "<WORKSPACE>"`。
 
-macOS 跟随 `$TMPDIR`（不一定是 `/tmp`），Windows 跟随系统 TEMP/TMP。目录独立且仅供当前用户访问，命令退出后保留以串联步骤；系统可能清理它。若已被清理，停止并新建工作区重测，不回退到当前目录或旧文件。完成后可按用户意愿清理本次工作区。FlClash 的恢复备份仍保存在应用数据目录，不移到临时目录。
+工具自有文件全部在 `<AGENT_DIR>/.good-cat/`：
+
+```text
+.good-cat/bin/           CLI 可执行文件
+.good-cat/workspaces/    测速、选择、生成的脚本
+.good-cat/tmp/           进程临时文件
+.good-cat/backups/       安装/API 恢复备份
+.good-cat/state/         锁和未完成事务日志
+```
+
+不写系统临时目录、用户缓存、全局路径或 Skill 目录。FlClash 自身的数据库、配置和偏好仍由 FlClash 保存在其应用数据目录；`good-cat` 自己生成的备份和日志均在 `.good-cat/state`、`.good-cat/backups`。完成后由 Agent 根据用户要求删除 `.good-cat` 和项目本地 Skill；不要删除 FlClash 自身数据。
 
 ## 分支：首次方案还是调整已有方案
 
@@ -102,7 +125,7 @@ macOS 跟随 `$TMPDIR`（不一定是 `/tmp`），Windows 跟随系统 TEMP/TMP�
 
 ## 3. 模型选择国家，程序校验并生成
 
-首次方案不需要模型比较并另选国家。读取工作区的 `report` 路径，确认 ChatGPT、Claude 的两份结果都覆盖 TW/SG/JP 且各有严格低于阈值的节点；将固定选择写到工作区返回的 `selection` 绝对路径（`selection.json`）：
+首次方案不需要模型比较并另选国家。读取工作区的 `report` 路径，确认 ChatGPT、Claude 的两份结果都覆盖 TW/SG/JP 且各有严格低于阈值的节点；将固定选择写到工作区返回的相对 `selection` 路径（`selection.json`）：
 
 ```json
 {"chatgpt":["TW","SG","JP"],"claude":["TW","SG","JP"]}
@@ -182,7 +205,7 @@ macOS 跟随 `$TMPDIR`（不一定是 `/tmp`），Windows 跟随系统 TEMP/TMP�
 
 - `controller restore --backup <开启时返回的备份路径>` 默认仅预览，确认后加 `--apply` 恢复 API 的原设置。
 - 有未完成的 controller 操作：`controller restore --apply` 使用本地恢复日志。
-- 有未完成的安装：`recover --apply` 恢复数据库和脚本。先向用户说明可能断网并获得确认。
+- 有未完成的安装：`recover --apply` 恢复数据库和脚本。日志和 `SQLite`/脚本备份都在 `.good-cat/state/`、`.good-cat/backups/`，不在 FlClash 应用数据目录。先向用户说明可能断网并获得确认。
 - 发现未完成事务时，不自动绕过、删除日志或重启不一致配置。断电/强杀不能保证自动恢复；Windows 的目录落盘保证与 Unix 不同。
 - 自动发现失败可使用 `--support-dir`、`--app`；`--preferences` 仅用于明确文件格式的高级/测试场景，macOS 正常使用原生 CFPreferences，不直接改 live plist。
 - 不展示订阅链接、节点凭据、数据库内容或 Secret；报告和备份不上传、不提交版本库。

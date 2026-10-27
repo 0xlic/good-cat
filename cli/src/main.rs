@@ -2,7 +2,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use good_cat::{
     api::Api,
-    install,
+    install, local,
     platform::{self, Preferences},
     render, speedtest, update, workspace,
 };
@@ -26,11 +26,9 @@ struct Cli {
     json: bool,
     #[arg(long, global = true)]
     support_dir: Option<PathBuf>,
-    #[arg(
-        long,
-        global = true,
-        help = "workspace create 返回的系统临时工作区路径"
-    )]
+    #[arg(long, global = true, default_value = local::DEFAULT_HOME, help = "Agent 当前目录内的本地数据根目录")]
+    home: PathBuf,
+    #[arg(long, global = true, help = "workspace create 返回的工作区路径")]
     workspace: Option<PathBuf>,
     #[arg(
         long,
@@ -182,7 +180,14 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 fn controller_journal(support: &Path) -> PathBuf {
-    support.join(".good-cat-pending-controller.json")
+    local::state_file(
+        "controller.json",
+        support.join(".good-cat-pending-controller.json"),
+    )
+}
+
+fn install_pending(support: &Path) -> PathBuf {
+    install::pending_install_path(support)
 }
 
 fn with_stopped<F>(
@@ -196,7 +201,7 @@ where
     F: FnOnce() -> Result<Value>,
 {
     let _lock = platform::Lock::acquire(support)?;
-    if support.join(".good-cat-pending-install.json").exists() && recovering != "install" {
+    if install_pending(support).exists() && recovering != "install" {
         bail!("存在待恢复的安装，请先 recover --apply；未重启应用");
     }
     if controller_journal(support).exists() && recovering != "controller" {
@@ -225,7 +230,7 @@ where
         .err()
         .and_then(|e| e.downcast_ref::<install::RecoveryFailure>())
         .is_none()
-        && !support.join(".good-cat-pending-install.json").exists()
+        && !install_pending(support).exists()
         && !controller_journal(support).exists();
     if consistent && (was_running || start) {
         if let Err(error) = platform::start(&app, Duration::from_secs(cli.lifecycle_timeout)) {
@@ -285,7 +290,7 @@ fn pending_backup(support: &Path) -> Result<PathBuf> {
             .context("恢复记录缺少路径")?,
     );
     let actual = fs::canonicalize(&backup)?;
-    let root = fs::canonicalize(support.join("skill-backups"))?;
+    let root = fs::canonicalize(local::backup_root(support.join("skill-backups")))?;
     if !actual.starts_with(root) {
         bail!("恢复记录的备份不在安全目录中");
     }
@@ -298,14 +303,14 @@ async fn enable_controller(cli: &Cli, support: &Path, port: u16, apply: bool) ->
     let endpoint = format!("127.0.0.1:{port}");
     if !apply {
         return Ok(
-            json!({"status":"confirmation_required","operation":"controller.enable","endpoint":endpoint,"may_disconnect":true,"starts_flclash":true,"existing_controller":previous,"secret_configured":!old_secret.is_empty(),"next":"用户确认后添加 --apply"}),
+            json!({"status":"confirmation_required","operation":"controller.enable","endpoint":endpoint,"may_disconnect":true,"starts_flclash":true,"existing_controller":previous,"secret_configured":!old_secret.is_empty(),"app":platform::app_info(cli.app.as_deref())?,"next":"用户确认后添加 --apply"}),
         );
     }
     let _lock = platform::Lock::acquire(support)?;
     if controller_journal(support).exists() {
         bail!("存在未完成的 controller 修改，请先 controller restore --apply");
     }
-    if support.join(".good-cat-pending-install.json").exists() {
+    if install_pending(support).exists() {
         bail!("存在未完成的脚本安装，请先 recover --apply");
     }
     let existing_ready = previous == endpoint
@@ -408,7 +413,7 @@ async fn enable_controller(cli: &Cli, support: &Path, port: u16, apply: bool) ->
     }
 }
 
-async fn dispatch(cli: &Cli) -> Result<Value> {
+async fn dispatch(cli: &Cli, home: &Path) -> Result<Value> {
     match &cli.command {
         Commands::Workspace {
             command: WorkspaceCommand::Create,
@@ -416,7 +421,9 @@ async fn dispatch(cli: &Cli) -> Result<Value> {
             if cli.workspace.is_some() {
                 bail!("创建工作区不接受 --workspace；请保留返回的新路径");
             }
-            Ok(workspace::describe(&workspace::create()?))
+            let mut result = workspace::describe(&workspace::create()?);
+            result["layout"] = local::layout(home);
+            Ok(result)
         }
         Commands::Render(args) => {
             let work = cli
@@ -474,7 +481,7 @@ async fn dispatch(cli: &Cli) -> Result<Value> {
             let rendered = render::render(&template, &report, &selection, args.threshold)?;
             platform::private_write(&output_path, rendered.javascript.as_bytes())?;
             Ok(
-                json!({"status":"ok","operation":"render","workspace":work,"output":output_path,"selection":rendered.selection,"installed":false}),
+                json!({"status":"ok","operation":"render","workspace":work.as_deref().map(local::display),"workspace_absolute":work,"output":local::display(&output_path),"output_absolute":output_path,"selection":rendered.selection,"installed":false}),
             )
         }
         Commands::Speedtest(args) => {
@@ -536,7 +543,7 @@ async fn dispatch(cli: &Cli) -> Result<Value> {
                 .all(|r| r.results.iter().all(|n| n.delay_ms.is_none()));
             platform::private_write(&output_path, &serde_json::to_vec_pretty(&report)?)?;
             Ok(
-                json!({"status":if failed_all{"all_failed"}else{"ok"},"operation":"speedtest","workspace":work,"output":output_path,"rounds":report.rounds,"aggregation":report.aggregation,"summary":report.reports.iter().map(|r|json!({"url":r.url,"tested":r.tested,"eligible":r.eligible.len(),"failed":r.failed})).collect::<Vec<_>>(),"warnings":report.warnings}),
+                json!({"status":if failed_all{"all_failed"}else{"ok"},"operation":"speedtest","workspace":work.as_deref().map(local::display),"workspace_absolute":work,"output":local::display(&output_path),"output_absolute":output_path,"rounds":report.rounds,"aggregation":report.aggregation,"summary":report.reports.iter().map(|r|json!({"url":r.url,"tested":r.tested,"eligible":r.eligible.len(),"failed":r.failed})).collect::<Vec<_>>(),"warnings":report.warnings}),
             )
         }
         _ => {
@@ -553,6 +560,8 @@ async fn dispatch(cli: &Cli) -> Result<Value> {
                 } => {
                     let mut summary = platform::enabled_summary(&preferences)?;
                     if matches!(&cli.command, Commands::Inspect) {
+                        summary["app"] = platform::app_info(cli.app.as_deref())?;
+                        summary["layout"] = local::layout(home);
                         let state = match summary.get("current_profile_id").and_then(Value::as_i64)
                         {
                             Some(id) => install::current_state(&support, id)?,
@@ -566,8 +575,7 @@ async fn dispatch(cli: &Cli) -> Result<Value> {
                     summary["support_dir"] = json!(support);
                     summary["pending_controller_recovery"] =
                         json!(controller_journal(&support).exists());
-                    summary["pending_install_recovery"] =
-                        json!(support.join(".good-cat-pending-install.json").exists());
+                    summary["pending_install_recovery"] = json!(install_pending(&support).exists());
                     Ok(summary)
                 }
                 Commands::Controller {
@@ -587,7 +595,7 @@ async fn dispatch(cli: &Cli) -> Result<Value> {
                     restore_fields(&mut json!({"patchClashConfig":{}}), &fields)?;
                     if !apply {
                         return Ok(
-                            json!({"status":"confirmation_required","operation":"controller.restore","backup":backup,"may_disconnect":true}),
+                            json!({"status":"confirmation_required","operation":"controller.restore","backup":backup,"may_disconnect":true,"app":platform::app_info(cli.app.as_deref())?}),
                         );
                     }
                     with_stopped(cli, &support, false, "controller", || {
@@ -621,7 +629,7 @@ async fn dispatch(cli: &Cli) -> Result<Value> {
                 Commands::CurrentScript | Commands::Update(_) => {
                     let work =
                         workspace::validate(cli.workspace.as_deref().context("需要 --workspace")?)?;
-                    if support.join(".good-cat-pending-install.json").exists() {
+                    if install_pending(&support).exists() {
                         bail!("存在待恢复的安装，请先 recover --apply");
                     }
                     if controller_journal(&support).exists() {
@@ -703,7 +711,7 @@ async fn dispatch(cli: &Cli) -> Result<Value> {
                     };
                     if !args.apply {
                         return Ok(
-                            json!({"status":"confirmation_required","operation":"install","script":script_path,"name":name,"may_disconnect":true,"activate_profile":activate,"plan":plan}),
+                            json!({"status":"confirmation_required","operation":"install","script":local::display(&script_path),"script_absolute":script_path,"name":name,"may_disconnect":true,"activate_profile":activate,"app":platform::app_info(cli.app.as_deref())?,"plan":plan}),
                         );
                     }
                     if controller_journal(&support).exists() {
@@ -729,7 +737,7 @@ async fn dispatch(cli: &Cli) -> Result<Value> {
                 Commands::Recover { apply } => {
                     if !apply {
                         return Ok(
-                            json!({"status":"confirmation_required","operation":"recover","may_disconnect":true}),
+                            json!({"status":"confirmation_required","operation":"recover","may_disconnect":true,"app":platform::app_info(cli.app.as_deref())?}),
                         );
                     }
                     with_stopped(cli, &support, false, "install", || {
@@ -748,7 +756,14 @@ async fn dispatch(cli: &Cli) -> Result<Value> {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-    match dispatch(&cli).await {
+    let home = match local::configure(&cli.home) {
+        Ok(home) => home,
+        Err(error) => {
+            output(&json!({"status":"error","error":format!("{error:#}")}));
+            std::process::exit(1);
+        }
+    };
+    match dispatch(&cli, &home).await {
         Ok(value) => {
             output(&value);
             if value.get("status").and_then(Value::as_str) == Some("all_failed") {

@@ -153,7 +153,7 @@ fn current(support: &Path, profile_id: i64) -> Result<(Baseline, PathBuf, String
         |r| r.get(0),
     )?;
     ensure!(refs == 1, "shared script updates are not allowed");
-    match fs::symlink_metadata(support.join(".good-cat-pending-install.json")) {
+    match fs::symlink_metadata(install::pending_install_path(&support)) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
         _ => anyhow::bail!("pending install requires recovery"),
     }
@@ -193,7 +193,10 @@ pub fn export_current(support: &Path, profile_id: i64, workspace: &Path) -> Resu
     Ok(
         json!({"status":"ok", "operation":"export_current", "profile_id": profile_id,
         "script_id":baseline.script_id, "label":baseline.label, "sha256":baseline.sha256,
-        "source_path":workspace.join(SOURCE), "baseline_path":workspace.join(BASELINE)}),
+        "source_path":crate::local::display(&workspace.join(SOURCE)),
+        "source_path_absolute":workspace.join(SOURCE),
+        "baseline_path":crate::local::display(&workspace.join(BASELINE)),
+        "baseline_path_absolute":workspace.join(BASELINE)}),
     )
 }
 
@@ -282,7 +285,9 @@ pub fn plan(support: &Path, profile_id: i64, workspace: &Path, script: &Path) ->
         json!({"status":"confirmation_required", "operation":"update", "profile_id":profile_id,
         "script_id":v.baseline.script_id, "label":v.baseline.label,
         "source_sha256":v.baseline.sha256, "destination_sha256":hash(v.candidate.as_bytes()),
-        "changed":v.source != v.candidate, "diff_path":diff_path}),
+        "changed":v.source != v.candidate,
+        "diff_path":crate::local::display(&diff_path),
+        "diff_path_absolute":diff_path}),
     )
 }
 
@@ -322,7 +327,9 @@ pub fn apply(support: &Path, profile_id: i64, workspace: &Path, script: &Path) -
     let mut installation = Value::Null;
     if changed {
         // Register the validated bytes, not a mutable candidate pathname.
-        let private = tempfile::tempdir()?;
+        let private = tempfile::Builder::new()
+            .prefix("good-cat-update-")
+            .tempdir_in(crate::local::temporary_root())?;
         let candidate = private.path().join("candidate.js");
         platform::private_write(&candidate, v.candidate.as_bytes())?;
         let (now, _, _) = current(support, profile_id)?;
@@ -607,7 +614,10 @@ mod tests {
         fs::write(&source, OLD).unwrap();
         symlink(
             f.support.join("absent"),
-            f.support.join(".good-cat-pending-install.json"),
+            crate::local::state_file(
+                "install.json",
+                f.support.join(".good-cat-pending-install.json"),
+            ),
         )
         .unwrap();
         assert!(export_current(&f.support, 7, &f.workspace).is_err());
