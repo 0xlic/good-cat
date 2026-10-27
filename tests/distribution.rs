@@ -29,8 +29,11 @@ fn required_skill_resources_are_readable() {
 fn skill_selects_countries_after_measurement_instead_of_fixed_defaults() {
     let text = fs::read_to_string(root().join("skill/good-cat/SKILL.md")).unwrap();
     assert!(text.contains("不预设任何国家"));
-    assert!(text.contains("国家得分 = 该国全部合格节点的聚合中位延迟的中位数"));
-    assert!(text.contains("取国家得分升序的前三名"));
+    assert!(text.contains("国家排名优先按合格节点数降序，其次按国家中位延迟升序"));
+    assert!(text.contains("按上述顺序最多选择三个国家"));
+    assert!(text.contains("单节点备选"));
+    assert!(text.contains("应按台湾、新加坡、越南排序"));
+    assert!(!text.contains("取国家得分升序的前三名"));
     assert!(text.contains("不能直接取报告前三个节点"));
     assert!(text.contains("不足三个"));
     assert!(text.contains("测速后统一清理并分析结果"));
