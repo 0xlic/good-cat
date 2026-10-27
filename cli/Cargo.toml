@@ -1,0 +1,47 @@
+[package]
+name = "good-cat"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+description = "FlClash controller, node speedtest and template installation CLI"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+fs2 = "0.4"
+plist = "1"
+rand = "0.8"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.32", features = ["bundled", "backup"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "signal"] }
+url = "2"
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
+
+[[test]]
+name = "cli_integration"
+path = "../tests/cli_integration.rs"
+
+[[test]]
+name = "install_defaults"
+path = "../tests/install_defaults.rs"
+
+[[test]]
+name = "workspace"
+path = "../tests/workspace.rs"
+
+[[test]]
+name = "distribution"
+path = "../tests/distribution.rs"
+
+[[test]]
+name = "bootstrap_mac"
+path = "../tests/bootstrap_mac.rs"

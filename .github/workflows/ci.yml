@@ -1,0 +1,40 @@
+name: Rust CLI
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            binary: good-cat
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            binary: good-cat
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary: good-cat.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+          targets: ${{ matrix.target }}
+          components: rustfmt, clippy
+      - run: cargo fmt --manifest-path cli/Cargo.toml --check
+      - run: cargo clippy --manifest-path cli/Cargo.toml --locked --all-targets -- -D warnings
+      - run: cargo test --manifest-path cli/Cargo.toml --locked
+      - run: cargo build --manifest-path cli/Cargo.toml --locked --release --target ${{ matrix.target }}
+      - shell: bash
+        run: |
+          mkdir -p dist
+          cp "cli/target/${{ matrix.target }}/release/${{ matrix.binary }}" "dist/${{ matrix.binary }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: good-cat-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error

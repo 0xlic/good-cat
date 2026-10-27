@@ -1,0 +1,102 @@
+name: Release CLI
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: read
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+      prerelease: ${{ steps.check.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo 'Invalid version tag'; exit 1; }
+          VERSION=$(awk -F '"' '/^version *=/ {print $2; exit}' cli/Cargo.toml)
+          [[ "$TAG" == "v$VERSION" ]] || { echo 'Tag must match cli/Cargo.toml package version'; exit 1; }
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          if [[ "$TAG" == *-* ]]; then echo 'prerelease=true' >> "$GITHUB_OUTPUT"; else echo 'prerelease=false' >> "$GITHUB_OUTPUT"; fi
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            binary: good-cat
+            asset: good-cat-aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            binary: good-cat
+            asset: good-cat-x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary: good-cat.exe
+            asset: good-cat-x86_64-pc-windows-msvc.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+          targets: ${{ matrix.target }}
+          components: rustfmt, clippy
+      - run: cargo fmt --manifest-path cli/Cargo.toml --check
+      - run: cargo clippy --manifest-path cli/Cargo.toml --locked --all-targets -- -D warnings
+      - run: cargo test --manifest-path cli/Cargo.toml --locked
+      - run: cargo build --manifest-path cli/Cargo.toml --locked --release --target ${{ matrix.target }}
+      - shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          BINARY: ${{ matrix.binary }}
+          ASSET: ${{ matrix.asset }}
+        run: |
+          mkdir -p dist
+          cp "cli/target/$TARGET/release/$BINARY" "dist/$ASSET"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+  publish:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+      - name: Verify expected artifacts and generate checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          test -s good-cat-aarch64-apple-darwin
+          test -s good-cat-x86_64-apple-darwin
+          test -s good-cat-x86_64-pc-windows-msvc.exe
+          sha256sum good-cat-* > SHA256SUMS
+      - name: Publish one immutable release after all builds pass
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.version.outputs.tag }}
+          PRERELEASE: ${{ needs.version.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          ARGS=(--verify-tag --generate-notes --title "$TAG")
+          if [[ "$PRERELEASE" == true ]]; then ARGS+=(--prerelease); fi
+          # Deliberately do not clobber previously published assets.
+          gh release create "$TAG" dist/good-cat-* dist/SHA256SUMS "${ARGS[@]}"
