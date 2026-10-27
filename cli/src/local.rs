@@ -88,13 +88,33 @@ pub fn temporary_root() -> PathBuf {
         .unwrap_or_else(std::env::temp_dir)
 }
 
+fn normalize(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let text = path.as_os_str().to_string_lossy();
+        if let Some(stripped) = text.strip_prefix(r"\\?\") {
+            return PathBuf::from(stripped);
+        }
+    }
+    path.to_owned()
+}
+
+fn relative_to(path: &Path, cwd: &Path) -> Option<PathBuf> {
+    path.strip_prefix(cwd).ok().map(Path::to_owned)
+}
+
 /// Relative to the Agent directory when possible; absolute only outside it.
 pub fn display(path: &Path) -> String {
-    match std::env::current_dir()
-        .ok()
-        .and_then(|cwd| fs::canonicalize(cwd).ok())
-        .and_then(|cwd| path.strip_prefix(cwd).ok().map(|value| value.to_owned()))
-    {
+    let path = normalize(path);
+    let cwd = std::env::current_dir().ok().map(|cwd| normalize(&cwd));
+    let relative = cwd
+        .as_deref()
+        .and_then(|cwd| relative_to(&path, cwd))
+        .or_else(|| {
+            let cwd = fs::canonicalize(std::env::current_dir().ok()?).ok()?;
+            relative_to(&normalize(&path), &normalize(&cwd))
+        });
+    match relative {
         Some(relative) if !relative.as_os_str().is_empty() => {
             format!("./{}", relative.display())
         }
