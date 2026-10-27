@@ -258,7 +258,8 @@ mod tests {
 
     #[test]
     fn preserves_template_and_line_endings_and_explicit_order() {
-        for template in [TEMPLATE.to_owned(), TEMPLATE.replace('\n', "\r\n")] {
+        let lf_template = TEMPLATE.replace("\r\n", "\n");
+        for template in [lf_template.clone(), lf_template.replace('\n', "\r\n")] {
             let mut report = report("US");
             report["reports"][0]["results"]
                 .as_array_mut()
