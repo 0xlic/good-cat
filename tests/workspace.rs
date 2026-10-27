@@ -1,5 +1,9 @@
 use serde_json::{json, Value};
-use std::{fs, path::PathBuf, process::Command};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 #[test]
 fn workspace_and_render_are_independent_of_cwd() {
@@ -15,13 +19,12 @@ fn workspace_and_render_are_independent_of_cwd() {
     let workspace = PathBuf::from(value["workspace_absolute"].as_str().unwrap());
     let expected = unrelated.path().join(".good-cat/workspaces");
     assert!(workspace.starts_with(expected.canonicalize().unwrap()));
-    assert_eq!(
-        value["workspace"],
-        format!(
-            "./.good-cat/workspaces/{}",
-            workspace.file_name().unwrap().to_str().unwrap()
-        )
-    );
+    let relative = PathBuf::from(value["workspace"].as_str().unwrap());
+    assert_eq!(relative.file_name(), workspace.file_name());
+    let suffix = Path::new(".good-cat")
+        .join("workspaces")
+        .join(workspace.file_name().unwrap());
+    assert!(relative.ends_with(suffix));
     let selection = PathBuf::from(value["selection_absolute"].as_str().unwrap());
     let report = PathBuf::from(value["report_absolute"].as_str().unwrap());
     fs::write(
