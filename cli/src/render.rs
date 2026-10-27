@@ -125,14 +125,9 @@ pub fn render(
             format!("const {constant} = {};", serde_json::to_string(countries)?),
         ));
 
-        // Read the URL from the actual group factory, including manual Claude groups.
-        let factory = if service == "claude" {
-            "(?:urlTest|claudeGroups)"
-        } else {
-            "urlTest"
-        };
+        // Both services are url-test groups; read the URL from the real call.
         let url_re = Regex::new(&format!(
-            r#"\b{factory}\(\s*{group}\s*,\s*("(?:\\.|[^"\\])*")\s*,\s*{constant}\s*\)"#
+            r#"\burlTest\(\s*{group}\s*,\s*("(?:\\.|[^"\\])*")\s*,\s*{constant}\s*\)"#
         ))?;
         let urls: Vec<_> = url_re.captures_iter(template).collect();
         ensure!(
@@ -320,7 +315,7 @@ mod tests {
         )
         .is_err());
         let duplicate = format!(
-            "{template}\nclaudeGroups(claudeGroupName, \"https://duplicate\", CLAUDE_COUNTRIES);"
+            "{template}\nurlTest(claudeGroupName, \"https://duplicate\", CLAUDE_COUNTRIES);"
         );
         assert!(render(
             &duplicate,
@@ -332,7 +327,7 @@ mod tests {
     }
 
     #[test]
-    fn template_manual_claude_behavior_with_optional_node() {
+    fn template_uses_urltest_for_claude_without_selector_children() {
         let script = r#"
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
@@ -353,29 +348,18 @@ function check(countries) {
   const result = vm.runInContext('main(config)', context);
   assert.equal(result, config);
   const groups = JSON.parse(JSON.stringify(result['proxy-groups']));
-  const codes = countries || ['TW', 'SG', 'JP'];
-  assert.equal(groups.length, codes.length + 3);
-  const parent = groups.find(g => g.name === '🧠 Claude');
-  assert.equal(parent.type, 'select');
-  assert.deepEqual(parent.proxies, codes.map(code => '🧠 Claude · ' + code));
-  assert.equal(parent['include-all'], undefined);
-  for (const code of codes) {
-    const child = groups.find(g => g.name === '🧠 Claude · ' + code);
-    assert.equal(child.type, 'select');
-    assert.equal(child['include-all'], true);
-    assert.equal(child.filter, vm.runInContext('countryFilter(["' + code + '"])', context));
-    assert.equal(child.url, 'https://claude.ai/cdn-cgi/trace');
-    assert.equal(child.interval, undefined);
-  }
-  assert.equal(parent.url, 'https://claude.ai/cdn-cgi/trace');
-  for (const [name, url, filter] of [
-    ['🤖 ChatGPT', 'https://chatgpt.com/cdn-cgi/trace', vm.runInContext('countryFilter(CHATGPT_COUNTRIES)', context)],
+  assert.equal(groups.length, 3);
+  assert.deepEqual(groups.map(g => g.name), ['🤖 ChatGPT', '🧠 Claude', '🌐 Porxy']);
+  for (const [name, url, constant] of [
+    ['🤖 ChatGPT', 'https://chatgpt.com/cdn-cgi/trace', 'CHATGPT_COUNTRIES'],
+    ['🧠 Claude', 'https://claude.ai/cdn-cgi/trace', 'CLAUDE_COUNTRIES'],
     ['🌐 Porxy', 'https://www.gstatic.com/generate_204', undefined]
   ]) {
     const expected = {name, type: 'url-test', 'include-all': true, url, interval: 300, tolerance: 50, lazy: true};
-    if (filter) expected.filter = filter;
+    if (constant) expected.filter = vm.runInContext('countryFilter(' + constant + ')', context);
     assert.deepEqual(groups.find(g => g.name === name), expected);
   }
+  assert.ok(!groups.some(g => g.type === 'select' || g.name.includes(' · ')));
   assert.deepEqual(Array.from(result.rules), [
     'GEOSITE,private,DIRECT', 'GEOIP,private,DIRECT,no-resolve',
     'GEOSITE,openai,🤖 ChatGPT', 'GEOSITE,anthropic,🧠 Claude',

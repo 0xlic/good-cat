@@ -71,6 +71,11 @@ fn inspect_exposes_selected_subscription_label_without_url_or_secret() {
     );
     let value: Value = serde_json::from_slice(&result.stdout).unwrap();
     assert_eq!(value["current_profile_label"], "良心云 · 全球专线套餐");
+    assert_eq!(
+        value["current_script"]["profile_label"],
+        "良心云 · 全球专线套餐"
+    );
+    assert_eq!(value["current_script"]["managed"], false);
     assert!(!String::from_utf8_lossy(&result.stdout).contains("secret.invalid"));
     assert!(!String::from_utf8_lossy(&result.stdout).contains("secret-not-for-output"));
 

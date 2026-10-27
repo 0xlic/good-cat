@@ -379,9 +379,9 @@ mod tests {
             fs::create_dir(support.join("scripts")).unwrap();
             let db = Connection::open(support.join("database.sqlite")).unwrap();
             db.execute_batch("CREATE TABLE scripts(id INTEGER PRIMARY KEY,label TEXT NOT NULL,last_update_time INTEGER NOT NULL,url TEXT,\"order\" INTEGER);
-                CREATE TABLE profiles(id INTEGER PRIMARY KEY,extend_type TEXT,script_id INTEGER);
+                CREATE TABLE profiles(id INTEGER PRIMARY KEY,extend_type TEXT,script_id INTEGER,selected_map TEXT);
                 INSERT INTO scripts VALUES(1,'good-cat-test',10,'https://secret.invalid',9);
-                INSERT INTO profiles VALUES(7,'script',1);").unwrap();
+                INSERT INTO profiles VALUES(7,'script',1,'{\"🧠 Claude\":\"pinned-node\"}');").unwrap();
             fs::write(support.join("scripts/1.js"), OLD).unwrap();
             let candidate = root.join("candidate.js");
             fs::write(&candidate, NEW).unwrap();
@@ -443,6 +443,12 @@ mod tests {
             })
             .unwrap();
         assert_eq!(row, (1, "script".into(), 7));
+        let pinned: String = db
+            .query_row("SELECT selected_map FROM profiles WHERE id=7", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(pinned, "{\"🧠 Claude\":\"pinned-node\"}");
         let row: (String, i64) = db
             .query_row("SELECT url,\"order\" FROM scripts", [], |r| {
                 Ok((r.get(0)?, r.get(1)?))
@@ -509,7 +515,7 @@ mod tests {
         let f = Fixture::new();
         f.export();
         f.plan().unwrap();
-        f.sql("INSERT INTO profiles VALUES(8,'none',1)");
+        f.sql("INSERT INTO profiles VALUES(8,'none',1,NULL)");
         assert!(check_plan(&f.support, 7, &f.workspace, &f.candidate).is_err());
         assert!(f.apply().is_err());
     }
@@ -542,7 +548,7 @@ mod tests {
             "UPDATE scripts SET label='user-script'",
             "INSERT INTO scripts VALUES(2,'good-cat-other',10,NULL,0); UPDATE profiles SET script_id=2",
             "UPDATE profiles SET extend_type='none'",
-            "INSERT INTO profiles VALUES(8,'script',1)",
+            "INSERT INTO profiles VALUES(8,'script',1,NULL)",
         ] {
             let f = Fixture::new();
             f.export();

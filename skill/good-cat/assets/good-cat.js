@@ -53,32 +53,13 @@ function main(config) {
     return group;
   }
 
-  // Claude 手动选择国家和节点，避免自动切换 IP；url 仅用于手动测速。
-  function claudeGroups(name, url, countries) {
-    countryFilter(countries); // 同样校验非空列表及国家代码。
-    const children = countries.map(function (code) {
-      return {
-        name: name + " · " + code,
-        type: "select",
-        "include-all": true,
-        filter: countryFilter([code]),
-        url: url
-      };
-    });
-    return [{
-      name: name,
-      type: "select",
-      proxies: children.map(function (group) { return group.name; }),
-      url: url
-    }].concat(children);
-  }
-
+  // Claude 仍是 url-test，不用 selector 子组。需要在 FlClash 中固定节点时，
+  // 使用该计算组的原生“首选/pin”功能；FlClash 会把选择持久化到 selectedMap。
   config["proxy-groups"] = [
-    urlTest(chatgptGroupName, "https://chatgpt.com/cdn-cgi/trace", CHATGPT_COUNTRIES)
-  ].concat(
-    claudeGroups(claudeGroupName, "https://claude.ai/cdn-cgi/trace", CLAUDE_COUNTRIES),
-    [urlTest(proxyGroupName, "https://www.gstatic.com/generate_204")]
-  );
+    urlTest(chatgptGroupName, "https://chatgpt.com/cdn-cgi/trace", CHATGPT_COUNTRIES),
+    urlTest(claudeGroupName, "https://claude.ai/cdn-cgi/trace", CLAUDE_COUNTRIES),
+    urlTest(proxyGroupName, "https://www.gstatic.com/generate_204")
+  ];
 
   // 本地域名和私有 IP 使用数据源维护的 private 分类，不重复枚举网段。
   const privateRules = [

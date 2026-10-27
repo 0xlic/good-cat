@@ -5,7 +5,7 @@ use cap_std::{
     ambient_authority,
     fs::{Dir, OpenOptions},
 };
-use rusqlite::{backup::Backup, params, Connection, OpenFlags};
+use rusqlite::{backup::Backup, params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -334,22 +334,50 @@ pub(crate) fn snapshot(support: &Path) -> Result<(tempfile::TempDir, Connection)
     Ok((snapshot, db))
 }
 
-/// Read only the selected subscription's display name; never return its URL.
-pub fn profile_label(support: &Path, profile_id: i64) -> Result<Option<String>> {
+/// Read selected profile label, mode and bound script identity only.
+/// Never return subscription URLs or script source.
+pub fn current_state(support: &Path, profile_id: i64) -> Result<Value> {
     let (_snapshot, db) = snapshot(support)?;
     let mut statement = db.prepare("PRAGMA table_info(profiles)")?;
     let columns = statement
         .query_map([], |row| row.get::<_, String>(1))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    if !columns.iter().any(|column| column == "label") {
-        return Ok(None);
-    }
-    let label: Option<String> = db.query_row(
-        "SELECT label FROM profiles WHERE id=?1",
-        [profile_id],
-        |row| row.get(0),
-    )?;
-    Ok(label.filter(|label| !label.trim().is_empty()))
+    let has_label = columns.iter().any(|column| column == "label");
+    let query = if has_label {
+        "SELECT label,extend_type,script_id FROM profiles WHERE id=?1"
+    } else {
+        "SELECT NULL,extend_type,script_id FROM profiles WHERE id=?1"
+    };
+    let (profile_label, extend_type, script_id): (Option<String>, Option<String>, Option<i64>) = db
+        .query_row(query, [profile_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .context("current profile does not exist")?;
+    let script_label: Option<String> = match script_id {
+        Some(id) => db
+            .query_row("SELECT label FROM scripts WHERE id=?1", [id], |row| {
+                row.get(0)
+            })
+            .optional()?,
+        None => None,
+    };
+    let managed = script_label.as_deref().is_some_and(is_managed_name);
+    Ok(json!({
+        "profile_id": profile_id,
+        "profile_label": profile_label.filter(|label| !label.trim().is_empty()),
+        "extend_type": extend_type,
+        "script_id": script_id,
+        "script_label": script_label,
+        "managed": managed,
+    }))
+}
+
+/// Compatibility helper for callers that only need the profile label.
+pub fn profile_label(support: &Path, profile_id: i64) -> Result<Option<String>> {
+    Ok(current_state(support, profile_id)?
+        .get("profile_label")
+        .and_then(Value::as_str)
+        .map(str::to_owned))
 }
 
 /// Read-only plan, including exact existing metadata and active profile references.
@@ -1108,6 +1136,10 @@ mod tests {
             profile_label(dir.path(), 7).unwrap().as_deref(),
             Some("订阅名称 · 全球节点")
         );
+        let state = current_state(dir.path(), 7).unwrap();
+        assert_eq!(state["profile_label"], "订阅名称 · 全球节点");
+        assert_eq!(state["managed"], false);
+        assert!(state.get("url").is_none());
         assert_eq!(
             fs::read(dir.path().join("database.sqlite")).unwrap(),
             before

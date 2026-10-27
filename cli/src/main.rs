@@ -553,12 +553,14 @@ async fn dispatch(cli: &Cli) -> Result<Value> {
                 } => {
                     let mut summary = platform::enabled_summary(&preferences)?;
                     if matches!(&cli.command, Commands::Inspect) {
-                        let label = match summary.get("current_profile_id").and_then(Value::as_i64)
+                        let state = match summary.get("current_profile_id").and_then(Value::as_i64)
                         {
-                            Some(id) => install::profile_label(&support, id)?,
-                            None => None,
+                            Some(id) => install::current_state(&support, id)?,
+                            None => Value::Null,
                         };
-                        summary["current_profile_label"] = json!(label);
+                        summary["current_profile_label"] =
+                            state.get("profile_label").cloned().unwrap_or(Value::Null);
+                        summary["current_script"] = state;
                     }
                     summary["status"] = json!("ok");
                     summary["support_dir"] = json!(support);

@@ -21,7 +21,7 @@ fn fixture(label: &str) -> (tempfile::TempDir, PathBuf) {
     let prefs = dir.path().join("preferences.json");
     fs::write(
         &prefs,
-        json!({"flutter.config":json!({"currentProfileId":123}).to_string()}).to_string(),
+        json!({"flutter.config":json!({"currentProfileId":123,"patchClashConfig":{"external-controller":"","secret":""}}).to_string()}).to_string(),
     )
     .unwrap();
     (dir, prefs)
@@ -53,6 +53,21 @@ fn managed_export_and_plan_are_offline_and_binding_guard_precedes_stop() {
     let work = good_cat::workspace::create().unwrap();
     let before = fs::read(dir.path().join("database.sqlite")).unwrap();
     let source = fs::read(dir.path().join("scripts/7.js")).unwrap();
+    let inspected = Command::new(env!("CARGO_BIN_EXE_good-cat"))
+        .args(["--json", "--support-dir"])
+        .arg(dir.path())
+        .arg("--preferences")
+        .arg(&prefs)
+        .args(["inspect"])
+        .output()
+        .unwrap();
+    assert!(inspected.status.success());
+    let inspected: Value = serde_json::from_slice(&inspected.stdout).unwrap();
+    assert_eq!(inspected["current_script"]["managed"], true);
+    assert_eq!(
+        inspected["current_script"]["script_label"],
+        "good-cat-fixture"
+    );
     let (ok, exported) = invoke(dir.path(), &prefs, &work, &["current-script"]);
     assert!(ok, "{exported}");
     assert_eq!(exported["label"], "good-cat-fixture");
