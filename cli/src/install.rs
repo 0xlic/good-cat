@@ -556,12 +556,14 @@ fn register_impl(
     let backups_dir = anchored_directory(&root_dir, "skill-backups")?;
     let backup_name = loop {
         let name = format!("good-cat-{:032x}", rand::random::<u128>());
-        let mut builder = cap_std::fs::DirBuilder::new();
+        let builder = cap_std::fs::DirBuilder::new();
         #[cfg(unix)]
-        {
+        let builder = {
             use cap_std::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
+            let mut private = builder;
+            private.mode(0o700);
+            private
+        };
         match backups_dir.create_dir_with(&name, &builder) {
             Ok(()) => break name,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
