@@ -125,8 +125,14 @@ pub fn render(
             format!("const {constant} = {};", serde_json::to_string(countries)?),
         ));
 
+        // Read the URL from the actual group factory, including manual Claude groups.
+        let factory = if service == "claude" {
+            "(?:urlTest|claudeGroups)"
+        } else {
+            "urlTest"
+        };
         let url_re = Regex::new(&format!(
-            r#"urlTest\(\s*{group}\s*,\s*("(?:\\.|[^"\\])*")\s*,\s*{constant}\s*\)"#
+            r#"\b{factory}\(\s*{group}\s*,\s*("(?:\\.|[^"\\])*")\s*,\s*{constant}\s*\)"#
         ))?;
         let urls: Vec<_> = url_re.captures_iter(template).collect();
         ensure!(
@@ -269,16 +275,142 @@ mod tests {
             let rendered = render(&template, &report, &selection, 600).unwrap();
             let expected = template
                 .replace(
-                    "const CHATGPT_COUNTRIES = [\"US\", \"JP\", \"SG\", \"TW\"];",
+                    "const CHATGPT_COUNTRIES = [\"TW\", \"SG\", \"JP\"];",
                     "const CHATGPT_COUNTRIES = [\"US\",\"JP\"];",
                 )
                 .replace(
-                    "const CLAUDE_COUNTRIES = [\"US\", \"JP\", \"SG\", \"TW\"];",
+                    "const CLAUDE_COUNTRIES = [\"TW\", \"SG\", \"JP\"];",
                     "const CLAUDE_COUNTRIES = [\"US\"];",
                 );
             assert_eq!(rendered.javascript, expected);
             assert_eq!(rendered.selection, selection);
         }
+    }
+
+    #[test]
+    fn claude_factory_url_and_country_count_are_configurable() {
+        let template = TEMPLATE.replace(
+            "https://claude.ai/cdn-cgi/trace",
+            "https://claude.ai/cdn-cgi/trace?manual",
+        );
+        let mut report = report("TW");
+        report["reports"][1]["url"] = json!("https://claude.ai/cdn-cgi/trace?manual");
+        report["reports"][1]["results"] = json!([
+            {"name":"TW", "delay_ms":100},
+            {"name":"SG", "delay_ms":100},
+            {"name":"JP", "delay_ms":100}
+        ]);
+        for countries in [
+            json!(["TW"]),
+            json!(["TW", "SG"]),
+            json!(["TW", "SG", "JP"]),
+        ] {
+            let selection = json!({"chatgpt":["TW"], "claude":countries});
+            let rendered = render(&template, &report, &selection, 600).unwrap();
+            assert!(rendered.javascript.contains(&format!(
+                "const CLAUDE_COUNTRIES = {};",
+                serde_json::to_string(&countries).unwrap()
+            )));
+        }
+        assert!(render(
+            TEMPLATE,
+            &report,
+            &json!({"chatgpt":["TW"],"claude":["TW"]}),
+            600
+        )
+        .is_err());
+        let duplicate = format!(
+            "{template}\nclaudeGroups(claudeGroupName, \"https://duplicate\", CLAUDE_COUNTRIES);"
+        );
+        assert!(render(
+            &duplicate,
+            &report,
+            &json!({"chatgpt":["TW"],"claude":["TW"]}),
+            600
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn template_manual_claude_behavior_with_optional_node() {
+        let script = r#"
+const assert = require('node:assert/strict');
+const vm = require('node:vm');
+const template = process.argv[1];
+function check(countries) {
+  const source = countries ? template.replace(
+    'const CLAUDE_COUNTRIES = ["TW", "SG", "JP"];',
+    'const CLAUDE_COUNTRIES = ' + JSON.stringify(countries) + ';'
+  ) : template;
+  const context = vm.createContext({});
+  vm.runInContext(source, context);
+  const config = {
+    proxies: [{name: 'TW node'}, {name: 'SG node'}, {name: 'JP node'}],
+    'proxy-providers': {subscription: {type: 'file', path: 'nodes.yaml'}},
+    'rule-providers': {old: {}}, 'sub-rules': {old: []}, rules: ['old']
+  };
+  context.config = config;
+  const result = vm.runInContext('main(config)', context);
+  assert.equal(result, config);
+  const groups = JSON.parse(JSON.stringify(result['proxy-groups']));
+  const codes = countries || ['TW', 'SG', 'JP'];
+  assert.equal(groups.length, codes.length + 3);
+  const parent = groups.find(g => g.name === '🧠 Claude');
+  assert.equal(parent.type, 'select');
+  assert.deepEqual(parent.proxies, codes.map(code => '🧠 Claude · ' + code));
+  assert.equal(parent['include-all'], undefined);
+  for (const code of codes) {
+    const child = groups.find(g => g.name === '🧠 Claude · ' + code);
+    assert.equal(child.type, 'select');
+    assert.equal(child['include-all'], true);
+    assert.equal(child.filter, vm.runInContext('countryFilter(["' + code + '"])', context));
+    assert.equal(child.url, 'https://claude.ai/cdn-cgi/trace');
+    assert.equal(child.interval, undefined);
+  }
+  assert.equal(parent.url, 'https://claude.ai/cdn-cgi/trace');
+  for (const [name, url, filter] of [
+    ['🤖 ChatGPT', 'https://chatgpt.com/cdn-cgi/trace', vm.runInContext('countryFilter(CHATGPT_COUNTRIES)', context)],
+    ['🌐 Porxy', 'https://www.gstatic.com/generate_204', undefined]
+  ]) {
+    const expected = {name, type: 'url-test', 'include-all': true, url, interval: 300, tolerance: 50, lazy: true};
+    if (filter) expected.filter = filter;
+    assert.deepEqual(groups.find(g => g.name === name), expected);
+  }
+  assert.deepEqual(Array.from(result.rules), [
+    'GEOSITE,private,DIRECT', 'GEOIP,private,DIRECT,no-resolve',
+    'GEOSITE,openai,🤖 ChatGPT', 'GEOSITE,anthropic,🧠 Claude',
+    'GEOSITE,microsoft,DIRECT', 'GEOSITE,apple,DIRECT',
+    'GEOSITE,cn,DIRECT', 'GEOIP,CN,DIRECT,no-resolve', 'MATCH,🌐 Porxy'
+  ]);
+  assert.equal(result.proxies.length, 3);
+  assert.ok(result['proxy-providers'].subscription);
+  assert.equal(result['rule-providers'], undefined);
+  assert.equal(result['sub-rules'], undefined);
+  assert.equal(result.mode, 'rule');
+}
+check();
+check(['US']);
+check(['JP', 'TW']);
+for (const countries of [[], ['ZZ']]) {
+  assert.throws(() => check(countries), /good-cat:/);
+}
+"#;
+        let output = match std::process::Command::new("node")
+            .args(["-e", script, TEMPLATE])
+            .output()
+        {
+            Ok(output) => output,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("skipping JavaScript behavior test: node is not installed");
+                return;
+            }
+            Err(error) => panic!("failed to run node: {error}"),
+        };
+        assert!(
+            output.status.success(),
+            "JavaScript behavior test failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]

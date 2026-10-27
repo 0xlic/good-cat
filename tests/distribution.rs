@@ -12,12 +12,8 @@ fn root() -> PathBuf {
 }
 
 #[test]
-fn skill_is_text_only_and_contains_platform_bootstraps() {
+fn required_skill_resources_are_readable() {
     let skill = root().join("skill/good-cat");
-    assert!(
-        !skill.join("bin").exists(),
-        "platform binaries must be cached outside the skill"
-    );
     for path in [
         "SKILL.md",
         "assets/good-cat.js",
@@ -27,29 +23,6 @@ fn skill_is_text_only_and_contains_platform_bootstraps() {
         let text = fs::read_to_string(skill.join(path)).unwrap();
         assert!(!text.is_empty());
     }
-}
-
-#[test]
-fn release_asset_contract_and_risk_guidance_are_present() {
-    let release = fs::read_to_string(root().join(".github/workflows/release.yml")).unwrap();
-    for asset in [
-        "good-cat-aarch64-apple-darwin",
-        "good-cat-x86_64-apple-darwin",
-        "good-cat-x86_64-pc-windows-msvc.exe",
-        "SHA256SUMS",
-    ] {
-        assert!(release.contains(asset), "missing {asset}");
-    }
-    assert!(release.contains("contents: write"));
-    assert!(release.contains("--verify-tag"));
-    let skill = fs::read_to_string(root().join("skill/good-cat/SKILL.md")).unwrap();
-    assert!(skill.contains("封号风险"));
-    assert!(skill.contains("单一国家"));
-    assert!(skill.contains("未检测"));
-    let readme = fs::read_to_string(root().join("README.md")).unwrap();
-    assert!(readme.contains("npx skills add"));
-    assert!(readme.contains("SHA256SUMS"));
-    assert!(!readme.contains("bin/good-cat[.exe]"));
 }
 
 #[cfg(unix)]

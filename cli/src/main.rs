@@ -4,7 +4,7 @@ use good_cat::{
     api::Api,
     install,
     platform::{self, Preferences},
-    render, speedtest, workspace,
+    render, speedtest, update, workspace,
 };
 use rand::{distributions::Alphanumeric, Rng};
 use serde_json::{json, Value};
@@ -59,6 +59,8 @@ enum Commands {
     Speedtest(SpeedArgs),
     Render(RenderArgs),
     Install(InstallArgs),
+    CurrentScript,
+    Update(UpdateArgs),
     Recover {
         #[arg(long)]
         apply: bool,
@@ -121,12 +123,13 @@ struct RenderArgs {
 struct InstallArgs {
     #[arg(long, help = "默认工作区内的 good-cat.generated.js")]
     script: Option<PathBuf>,
-    #[arg(long, default_value = "good-cat")]
-    name: String,
+    #[arg(
+        long,
+        help = "由 Agent 根据当前订阅名称精简命名，例如 good-cat-订阅简称"
+    )]
+    name: Option<String>,
     #[arg(long)]
     apply: bool,
-    #[arg(long)]
-    allow_active_update: bool,
     #[arg(long, conflicts_with_all = ["activate_current", "register_only"])]
     activate_profile: Option<i64>,
     #[arg(long, conflicts_with_all = ["activate_profile", "register_only"], help="显式关联当前订阅（默认行为）")]
@@ -135,6 +138,22 @@ struct InstallArgs {
     register_only: bool,
     #[arg(long)]
     start: bool,
+}
+
+#[derive(Args)]
+struct UpdateArgs {
+    #[arg(long, help = "默认工作区内的 good-cat.generated.js")]
+    script: Option<PathBuf>,
+    #[arg(long)]
+    apply: bool,
+}
+
+fn current_profile(preferences: &Preferences) -> Result<i64> {
+    preferences
+        .load()?
+        .get("currentProfileId")
+        .and_then(Value::as_i64)
+        .context("无法读取当前配置 ID")
 }
 
 fn output(value: &Value) {
@@ -533,6 +552,14 @@ async fn dispatch(cli: &Cli) -> Result<Value> {
                     command: ControllerCommand::Status,
                 } => {
                     let mut summary = platform::enabled_summary(&preferences)?;
+                    if matches!(&cli.command, Commands::Inspect) {
+                        let label = match summary.get("current_profile_id").and_then(Value::as_i64)
+                        {
+                            Some(id) => install::profile_label(&support, id)?,
+                            None => None,
+                        };
+                        summary["current_profile_label"] = json!(label);
+                    }
                     summary["status"] = json!("ok");
                     summary["support_dir"] = json!(support);
                     summary["pending_controller_recovery"] =
@@ -589,7 +616,60 @@ async fn dispatch(cli: &Cli) -> Result<Value> {
                         Ok(json!({"status":"ok","operation":"controller.restore","restored":true}))
                     })
                 }
+                Commands::CurrentScript | Commands::Update(_) => {
+                    let work =
+                        workspace::validate(cli.workspace.as_deref().context("需要 --workspace")?)?;
+                    if support.join(".good-cat-pending-install.json").exists() {
+                        bail!("存在待恢复的安装，请先 recover --apply");
+                    }
+                    if controller_journal(&support).exists() {
+                        bail!("存在待恢复的设置，请先 controller restore --apply");
+                    }
+                    let profile_id = current_profile(&preferences)?;
+                    match &cli.command {
+                        Commands::CurrentScript => {
+                            update::export_current(&support, profile_id, &work)
+                        }
+                        Commands::Update(args) => {
+                            let script = workspace::explicit_or_default(
+                                args.script.as_deref(),
+                                Some(&work),
+                                workspace::SCRIPT,
+                            )?;
+                            if !args.apply {
+                                return update::plan(&support, profile_id, &work, &script);
+                            }
+                            let mut verified =
+                                update::check_plan(&support, profile_id, &work, &script)?;
+                            let unchanged = verified
+                                .get("source_sha256")
+                                .and_then(Value::as_str)
+                                .zip(verified.get("destination_sha256").and_then(Value::as_str))
+                                .is_some_and(|(source, destination)| source == destination);
+                            if unchanged {
+                                verified["changed"] = json!(false);
+                                verified["status"] = json!("ok");
+                                verified["operation"] = json!("update");
+                                verified["restarted"] = json!(false);
+                                return Ok(verified);
+                            }
+                            with_stopped(cli, &support, false, "", || {
+                                if current_profile(&preferences)? != profile_id {
+                                    bail!("退出时当前订阅发生变化，请重新导出并预览后再更新");
+                                }
+                                update::apply(&support, profile_id, &work, &script)
+                            })
+                        }
+                        _ => unreachable!(),
+                    }
+                }
                 Commands::Install(args) => {
+                    let name = args.name.clone().context(
+                        "需要 Agent 根据当前订阅名称通过 --name 命名，无需向用户单独确认名称",
+                    )?;
+                    if !install::is_managed_name(&name) {
+                        bail!("脚本名称必须为 good-cat-订阅简称，后缀以文字或数字开头，最多 80 字符，仅允许文字、数字、点、下划线和连字符；已有用户脚本受保护");
+                    }
                     let script_path = workspace::explicit_or_default(
                         args.script.as_deref(),
                         cli.workspace.as_deref(),
@@ -598,7 +678,14 @@ async fn dispatch(cli: &Cli) -> Result<Value> {
                     if !script_path.is_file() || fs::read(&script_path)?.is_empty() {
                         bail!("安装脚本不存在或为空");
                     }
-                    let plan = install::inspect(&support, &args.name)?;
+                    let plan = install::inspect(&support, &name)?;
+                    if plan
+                        .get("scripts")
+                        .and_then(Value::as_array)
+                        .is_none_or(|scripts| !scripts.is_empty())
+                    {
+                        bail!("安装仅允许新建脚本；已有脚本必须通过 current-script 和 update 按当前订阅更新");
+                    }
                     let activate = if !args.register_only
                         && (args.activate_current || args.activate_profile.is_none())
                     {
@@ -614,7 +701,7 @@ async fn dispatch(cli: &Cli) -> Result<Value> {
                     };
                     if !args.apply {
                         return Ok(
-                            json!({"status":"confirmation_required","operation":"install","script":script_path,"name":args.name,"may_disconnect":true,"activate_profile":activate,"plan":plan}),
+                            json!({"status":"confirmation_required","operation":"install","script":script_path,"name":name,"may_disconnect":true,"activate_profile":activate,"plan":plan}),
                         );
                     }
                     if controller_journal(&support).exists() {
@@ -630,13 +717,8 @@ async fn dispatch(cli: &Cli) -> Result<Value> {
                                 bail!("退出时当前订阅发生变化，请重新预览后再安装");
                             }
                         }
-                        let mut result = install::register(
-                            &support,
-                            &script_path,
-                            &args.name,
-                            args.allow_active_update,
-                            activate,
-                        )?;
+                        let mut result =
+                            install::register(&support, &script_path, &name, false, activate)?;
                         result["status"] = json!("ok");
                         result["operation"] = json!("install");
                         Ok(result)

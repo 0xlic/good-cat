@@ -1,8 +1,8 @@
 // good-cat — FlClash 覆写脚本，入口 main(config)。
 // 按节点名称识别国家；可分别修改下面两个数组。
 // 保留订阅节点、proxy-providers 及 FlClash 默认 GeoSite 数据源；替换所有分组和规则。
-const CHATGPT_COUNTRIES = ["US", "JP", "SG", "TW"];
-const CLAUDE_COUNTRIES = ["US", "JP", "SG", "TW"];
+const CHATGPT_COUNTRIES = ["TW", "SG", "JP"];
+const CLAUDE_COUNTRIES = ["TW", "SG", "JP"];
 
 const COUNTRY_PATTERNS = {
   US: "美国|美國|美利坚|美利堅|洛杉矶|洛杉磯|圣何塞|聖何塞|西雅图|西雅圖|纽约|紐約|🇺🇸|\\b(?:US|USA|United States)\\b",
@@ -53,11 +53,32 @@ function main(config) {
     return group;
   }
 
+  // Claude 手动选择国家和节点，避免自动切换 IP；url 仅用于手动测速。
+  function claudeGroups(name, url, countries) {
+    countryFilter(countries); // 同样校验非空列表及国家代码。
+    const children = countries.map(function (code) {
+      return {
+        name: name + " · " + code,
+        type: "select",
+        "include-all": true,
+        filter: countryFilter([code]),
+        url: url
+      };
+    });
+    return [{
+      name: name,
+      type: "select",
+      proxies: children.map(function (group) { return group.name; }),
+      url: url
+    }].concat(children);
+  }
+
   config["proxy-groups"] = [
-    urlTest(chatgptGroupName, "https://chatgpt.com/cdn-cgi/trace", CHATGPT_COUNTRIES),
-    urlTest(claudeGroupName, "https://claude.ai/cdn-cgi/trace", CLAUDE_COUNTRIES),
-    urlTest(proxyGroupName, "https://www.gstatic.com/generate_204")
-  ];
+    urlTest(chatgptGroupName, "https://chatgpt.com/cdn-cgi/trace", CHATGPT_COUNTRIES)
+  ].concat(
+    claudeGroups(claudeGroupName, "https://claude.ai/cdn-cgi/trace", CLAUDE_COUNTRIES),
+    [urlTest(proxyGroupName, "https://www.gstatic.com/generate_204")]
+  );
 
   // 本地域名和私有 IP 使用数据源维护的 private 分类，不重复枚举网段。
   const privateRules = [

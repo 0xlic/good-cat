@@ -1,3 +1,5 @@
+mod managed_update;
+
 use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::{
@@ -70,6 +72,8 @@ fn install_plan_does_not_mutate_database_or_register() {
     let mut args = args_for(dir.path(), &prefs);
     args.extend([
         "install".into(),
+        "--name".into(),
+        "good-cat-订阅简称".into(),
         "--script".into(),
         script.to_str().unwrap().into(),
         "--activate-current".into(),
@@ -79,6 +83,10 @@ fn install_plan_does_not_mutate_database_or_register() {
     let result = decoded(&out);
     assert_eq!(result["status"], "confirmation_required");
     assert_eq!(result["activate_profile"], 123);
+    assert!(good_cat::install::is_managed_name(
+        result["name"].as_str().unwrap()
+    ));
+    assert_eq!(result["name"], "good-cat-订阅简称");
     let db = Connection::open(dir.path().join("database.sqlite")).unwrap();
     assert_eq!(
         db.query_row("SELECT count(*) FROM scripts", [], |r| r.get::<_, i64>(0))
@@ -116,11 +124,11 @@ fn renderer_requires_model_selection_and_preserves_template() {
     let template = include_str!("../skill/good-cat/assets/good-cat.js");
     let expected = template
         .replace(
-            "const CHATGPT_COUNTRIES = [\"US\", \"JP\", \"SG\", \"TW\"];",
+            "const CHATGPT_COUNTRIES = [\"TW\", \"SG\", \"JP\"];",
             "const CHATGPT_COUNTRIES = [\"US\"];",
         )
         .replace(
-            "const CLAUDE_COUNTRIES = [\"US\", \"JP\", \"SG\", \"TW\"];",
+            "const CLAUDE_COUNTRIES = [\"TW\", \"SG\", \"JP\"];",
             "const CLAUDE_COUNTRIES = [\"JP\"];",
         );
     assert_eq!(js, expected);
@@ -164,7 +172,14 @@ fn unresolved_install_journal_blocks_mutations_before_process_control() {
     let before = fs::read(&prefs).unwrap();
     for extra in [
         vec!["controller", "enable", "--apply"],
-        vec!["install", "--apply", "--script", script.to_str().unwrap()],
+        vec![
+            "install",
+            "--name",
+            "good-cat-test",
+            "--apply",
+            "--script",
+            script.to_str().unwrap(),
+        ],
     ] {
         let mut args = args_for(dir.path(), &prefs);
         args.extend(extra.iter().map(|s| s.to_string()));

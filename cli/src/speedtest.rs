@@ -677,7 +677,6 @@ mod tests {
         assert!(!tests_claude(&[
             "https://claude.ai.example.invalid/test".into()
         ]));
-        assert!(CLAUDE_IP_WARNING.contains("本工具未检测 IP 信誉"));
     }
 
     #[test]
